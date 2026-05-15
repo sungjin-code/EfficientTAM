@@ -280,7 +280,6 @@ class ViT(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
-
         x = self.patch_embed(x)
         if self.pos_embed is not None:
             x = x + get_abs_pos(

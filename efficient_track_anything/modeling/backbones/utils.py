@@ -14,6 +14,7 @@ import torch.nn.functional as F
 
 import math
 
+
 def window_partition(x, window_size):
     """
     Partition into non-overlapping windows with padding if needed.

@@ -323,7 +323,6 @@ def get_mask_efficienttam_process(
     working_frame: str = None,  # current frame being added points
     available_frames_to_check: List[str] = [],
 ):
-
     if len(tracking_points.value) == 0:
         return (
             gr.update(visible=False),
@@ -570,7 +569,6 @@ def switch_working_frame(working_frame, scanned_frames, video_frames_dir):
 
 
 def reset_propagation(first_frame_path, predictor, stored_inference_state):
-
     predictor.reset_state(stored_inference_state)
     # print(f"RESET State: {stored_inference_state} ")
     return (
@@ -601,7 +599,6 @@ with gr.Blocks() as demo:
         # Title
         gr.Markdown(title)
         with gr.Row():
-
             with gr.Column():
                 # Instructions
                 gr.Markdown(description_p)

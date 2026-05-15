@@ -137,7 +137,7 @@ def show_masks(
             # boxes
             show_box(box_coords, plt.gca())
         if len(scores) > 1:
-            plt.title(f"Mask {i+1}, Score: {score:.3f}", fontsize=18)
+            plt.title(f"Mask {i + 1}, Score: {score:.3f}", fontsize=18)
         plt.axis("off")
         plt.show()
         if box_coords is not None:

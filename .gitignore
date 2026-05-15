@@ -1,6 +1,30 @@
+# model weights
+checkpoints/*.pt
+
+# generated outputs
 output_video.mp4
 output_first_frame.jpg
 frames_*
+notebooks/output_*
+outputs/
+
+# sample media (large binary assets)
+figs/
+examples/
+notebooks/videos/
+notebooks/images/
+
+# python
+.venv/
 *.egg-info
 __pycache__/
-checkpoints/*.pt
+*.pyc
+
+# tools
+.DS_Store
+.ruff_cache/
+.vscode/
+.claude/
+CLAUDE.md
+AGENT.md
+GEMINI.md
