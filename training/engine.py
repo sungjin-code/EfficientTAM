@@ -19,6 +19,7 @@ import torch.nn.functional as F
 from training.data.prompts import PromptSampler
 from training.losses import MultiStepLoss
 from training.optim import WarmupCosineSchedule, clip_grad_norm
+from training.wandb_utils import WandbLogger
 
 
 @dataclass
@@ -226,6 +227,7 @@ def train_one_epoch_image(
     overfit_one_batch: bool = False,
     max_steps: int | None = None,
     precision: str = "auto",
+    logger: Optional[WandbLogger] = None,
 ) -> dict:
     """One pass over the image loader. Each batch is a T=1 clip."""
     model.train()
@@ -278,16 +280,31 @@ def train_one_epoch_image(
         scheduler.step()
         state.step += 1
 
-        running["loss"] += float(loss.detach().item())
+        step_loss = float(loss.detach().item())
+        running["loss"] += step_loss
         running["n"] += 1
+        if logger is not None and logger.enabled:
+            logger.log(
+                {
+                    "train/loss": step_loss,
+                    "train/lr": optimizer.param_groups[0]["lr"],
+                    "train/epoch": state.epoch,
+                },
+                step=state.step,
+            )
         if state.step % log_every == 0:
             avg = running["loss"] / max(1, running["n"])
             lr = optimizer.param_groups[0]["lr"]
             elapsed = time.time() - t_start
+            ips = running["n"] / max(elapsed, 1e-3)
             print(
                 f"[image] step={state.step} epoch={state.epoch} loss={avg:.4f} "
-                f"lr={lr:.2e} ips={running['n'] / max(elapsed, 1e-3):.2f}"
+                f"lr={lr:.2e} ips={ips:.2f}"
             )
+            if logger is not None and logger.enabled:
+                logger.log(
+                    {"train/loss_avg": avg, "train/ips": ips}, step=state.step
+                )
             running = {"loss": 0.0, "n": 0}
             t_start = time.time()
     return {"final_loss": float(loss.detach().item())}
@@ -307,6 +324,7 @@ def train_one_epoch_video(
     overfit_one_batch: bool = False,
     max_steps: int | None = None,
     precision: str = "auto",
+    logger: Optional[WandbLogger] = None,
 ) -> dict:
     model.train()
     fixed_batch = None
@@ -357,16 +375,32 @@ def train_one_epoch_video(
         scheduler.step()
         state.step += 1
 
-        running["loss"] += float(loss.detach().item())
+        step_loss = float(loss.detach().item())
+        running["loss"] += step_loss
         running["n"] += 1
+        if logger is not None and logger.enabled:
+            logger.log(
+                {
+                    "train/loss": step_loss,
+                    "train/lr": optimizer.param_groups[0]["lr"],
+                    "train/epoch": state.epoch,
+                },
+                step=state.step,
+            )
         if state.step % log_every == 0:
             avg = running["loss"] / max(1, running["n"])
             lr = optimizer.param_groups[0]["lr"]
             elapsed = time.time() - t_start
+            cps = running["n"] / max(elapsed, 1e-3)
             print(
                 f"[video] step={state.step} epoch={state.epoch} loss={avg:.4f} "
-                f"lr={lr:.2e} clips/s={running['n'] / max(elapsed, 1e-3):.2f}"
+                f"lr={lr:.2e} clips/s={cps:.2f}"
             )
+            if logger is not None and logger.enabled:
+                logger.log(
+                    {"train/loss_avg": avg, "train/clips_per_s": cps},
+                    step=state.step,
+                )
             running = {"loss": 0.0, "n": 0}
             t_start = time.time()
     return {"final_loss": float(loss.detach().item())}

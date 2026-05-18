@@ -28,6 +28,7 @@ from training.engine import (
 )
 from training.losses import LossWeights, MultiStepLoss
 from training.optim import WarmupCosineSchedule, build_optimizer
+from training.wandb_utils import make_logger
 
 
 def pick_device() -> torch.device:
@@ -154,6 +155,22 @@ def main() -> None:
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    logger = make_logger()
+    logger.init(
+        wandb_cfg=cfg.get("wandb"),
+        run_config={
+            "stage": "video",
+            "config_path": args.config,
+            "output_dir": str(out_dir),
+            "device": str(device),
+            "precision": args.precision,
+            "max_steps": args.max_steps,
+            "init_from": args.init_from,
+            **train_cfg,
+        },
+        default_run_name=f"video_{out_dir.name}",
+    )
+
     for epoch in range(state.epoch, train_cfg["epochs"]):
         if args.max_steps is not None and state.step >= args.max_steps:
             break
@@ -172,14 +189,17 @@ def main() -> None:
             overfit_one_batch=args.overfit_one_batch,
             max_steps=args.max_steps,
             precision=args.precision,
+            logger=logger,
         )
         ckpt_path = out_dir / f"video_epoch_{epoch:04d}.pt"
         save_checkpoint(model, optimizer, scheduler, str(ckpt_path), state)
         print(f"[train_video] saved {ckpt_path}")
+        logger.log({"checkpoint/epoch": epoch}, step=state.step)
 
     final_path = out_dir / "video_final.pt"
     save_checkpoint(model, optimizer, scheduler, str(final_path), state)
     print(f"[train_video] done. final={final_path}")
+    logger.finish()
 
 
 if __name__ == "__main__":

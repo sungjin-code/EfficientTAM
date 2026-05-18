@@ -20,6 +20,9 @@ notebooks/images/
 __pycache__/
 *.pyc
 
+# secrets
+.env
+
 # tools
 .DS_Store
 .ruff_cache/
