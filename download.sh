@@ -1,8 +1,9 @@
 #!/bin/bash
 set -e
 
-# Absolute path of the directory where this script is located (/data)
-DATA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Data directory path (one level below the script location)
+DATA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/data"
+mkdir -p "$DATA_DIR"
 
 echo "Setting up datasets in $DATA_DIR"
 echo "Environment: Linux (using wget)"

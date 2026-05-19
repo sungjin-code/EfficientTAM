@@ -2,351 +2,451 @@
 
 > [Efficient Track Anything](https://arxiv.org/pdf/2411.18933), ICCV 2025.
 
-A lightweight, real-time image and video segmentation model adapted from Meta's SAM2. EfficientTAM replaces SAM2's heavyweight ViT encoder with a compact ViT-Det backbone and introduces an efficient memory cross-attention mechanism, achieving >10 fps on iPhone 15 while maintaining segmentation quality comparable to SAM2.
+This repository contains the official EfficientTAM model/inference code plus a
+local training, validation, and headless inference pipeline.
 
----
+EfficientTAM is a lightweight image/video segmentation model adapted from SAM 2.
+It uses compact ViT backbones and an efficient memory attention module to reduce
+latency while keeping SAM 2-like segmentation quality.
 
-## Repository Structure
+## Contents
 
 ```text
 EfficientTAM/
-├── app.py                          # Gradio demo — video segmentation (interactive)
-├── app_image.py                    # Gradio demo — image segmentation (interactive)
-├── checkpoints/                    # Destination for weights saved by your own training runs
-├── notebooks/                      # Example scripts and Jupyter notebooks
-├── examples/                       # Sample images and videos for testing
-├── efficient_track_anything/       # Core model package (inference + architecture)
-├── training/                       # From-scratch training pipeline
-└── tools/                          # Batch inference + J&F validation
+├── app.py                          # Gradio video demo
+├── app_image.py                    # Gradio image demo
+├── checkpoints/                    # Downloaded or trained weights
+├── data/                           # Dataset preparation helpers
+├── efficient_track_anything/       # Official EfficientTAM package
+│   ├── build_efficienttam.py       # Model / predictor builders
+│   ├── configs/efficienttam/       # Model architecture configs
+│   ├── configs/training/           # Training configs
+│   ├── efficienttam_image_predictor.py
+│   ├── efficienttam_video_predictor.py
+│   └── modeling/
+├── training/                       # Local training pipeline
+│   ├── train_image.py              # Stage 1 image pretraining
+│   ├── train_video.py              # Stage 2 video fine-tuning
+│   ├── distributed.py              # torchrun helpers for multi-GPU
+│   ├── engine.py                   # forward / train loop / checkpoints
+│   ├── losses.py                   # focal + dice + IoU + object losses
+│   ├── optim.py                    # AdamW + paper LR schedules
+│   └── data/
+├── tools/
+│   ├── infer.py                    # CLI image/video inference
+│   ├── validate.py                 # DAVIS-style J&F validation
+│   └── jf_metric.py
+└── train.sh                        # 2-GPU training pipeline
 ```
 
-### `efficient_track_anything/` — model + inference
+## Install
 
-```text
-efficient_track_anything/
-├── build_efficienttam.py           # Model factory — entry point for loading models
-├── efficienttam_video_predictor.py # Stateful video tracking interface
-├── efficienttam_image_predictor.py # Stateless image segmentation interface
-├── automatic_mask_generator.py     # Segment-everything via grid-based prompting
-├── benchmark.py                    # FPS and parameter count benchmarking
-├── configs/efficienttam/           # Hydra YAML configs for each model variant
-├── modeling/                       # Core model architecture
-│   ├── efficienttam_base.py        # EfficientTAMBase — shared model class
-│   ├── memory_attention.py         # Efficient cross-attention between frames
-│   ├── memory_encoder.py           # Encodes output masks into memory tokens
-│   ├── position_encoding.py        # RoPE positional encoding
-│   ├── backbones/vitdet.py         # Lightweight ViT-Det image encoder
-│   └── sam/                        # Prompt encoder + mask decoder (from SAM2)
-└── utils/                          # Image transforms, AMG helpers, video I/O
+Use Linux with CUDA for training. The training scripts auto-select CUDA, MPS, or
+CPU, but the intended setup is CUDA.
+
+```bash
+conda create -n efficienttam python=3.12
+conda activate efficienttam
+pip install -r requirements.txt
 ```
 
-### `training/` — train EfficientTAM from scratch
+If you want to run the official interactive demos with pretrained weights:
 
-```text
-training/
-├── train_image.py                  # Stage 1 entry: SA-1B-style image pretraining
-├── train_video.py                  # Stage 2 entry: SA-V-style video fine-tuning
-├── engine.py                       # forward_clip + train loop (manages memory bookkeeping)
-├── losses.py                       # focal + dice + IoU L1 + obj-score BCE (best-of-3)
-├── optim.py                        # AdamW + layerwise LR decay + warmup-cosine
-├── data/
-│   ├── image_dataset.py            # SA-1B-style image dataset
-│   ├── video_dataset.py            # SA-V / DAVIS / YouTube-VOS layout video dataset
-│   ├── augment.py                  # Image / clip augmentations (shared per-clip state)
-│   └── prompts.py                  # PromptSampler — point / box / correction-click sampling
-└── wandb_utils.py                  # Optional Weights & Biases logger (no-op without API key)
+```bash
+cd checkpoints
+./download_checkpoints.sh
+cd ..
 ```
 
-### `tools/` — batch inference + validation
+## Configure Paths
 
-```text
-tools/
-├── infer.py                        # Headless batch inference (image / video frames dir)
-├── validate.py                     # DAVIS-style J&F validation runner
-└── jf_metric.py                    # J (region) & F (boundary) metric implementation
+Copy the example env file and fill in your local paths:
+
+```bash
+cp .env.example .env
 ```
 
----
-
-## Model Variants
-
-Pick a variant when you start a training run by selecting the matching Hydra training config name:
-
-| Variant       | Resolution | Training configs                                                       | Notes                      |
-| ------------- | ---------- | ---------------------------------------------------------------------- | -------------------------- |
-| `s`           | 1024×1024  | `training/train_image_s`, `training/train_video_s`                     | Small model, best quality  |
-| `s_512x512`   | 512×512    | (use the `_s_512x512` model YAML in overrides)                         | Small model, faster        |
-| `ti`          | 1024×1024  | `training/train_image_ti`, `training/train_video_ti`                   | Tiny model, most efficient |
-| `ti_512x512`  | 512×512    | (use the `_ti_512x512` model YAML in overrides)                        | Tiny model, fastest        |
-
-All YAMLs live under `efficient_track_anything/configs/` (the package's Hydra config root): architecture YAMLs in `configs/efficienttam/`, training YAMLs (which reference an architecture YAML plus hyperparameters) in `configs/training/`. `--config` takes a Hydra config name relative to that root.
-
----
-
-## Training
-
-EfficientTAM is trained in two stages, matching the paper recipe.
-
-### Configuration via `.env`
-
-Paths to datasets, output directories, and seed weights can be set in a `.env`
-file at the repo root so they don't have to be passed on the CLI every run.
-Copy [.env.example](.env.example) → `.env` and fill in what you need. CLI
-flags always override the env values.
+Typical `.env`:
 
 ```dotenv
-# Weights & Biases — leave WANDB_API_KEY empty to disable logging entirely.
-WANDB_API_KEY=...
+WANDB_API_KEY=
 WANDB_PROJECT=efficient-tam
 
-# Dataset roots (shared, or per-stage with _IMAGE / _VIDEO suffix)
-DATA_ROOT=/data
-DATA_ROOT_IMAGE=/data/sa1b
-DATA_ROOT_VIDEO=/data/davis17
+DATA_ROOT_IMAGE=/data/sa1b_style
+DATA_ROOT_VIDEO=/data/davis_or_sav
 
-# Output directories for checkpoints
-OUTPUT_DIR_IMAGE=runs/image_s
-OUTPUT_DIR_VIDEO=runs/video_s
+OUTPUT_DIR_IMAGE=runs/image_ti
+OUTPUT_DIR_VIDEO=runs/video_ti
 
-# Stage-1 → Stage-2 weight handoff, and resume points
-INIT_FROM=runs/image_s/image_final.pt
-RESUME_VIDEO=runs/video_s/video_latest.pt
+INIT_FROM=runs/image_ti/image_final.pt
 ```
 
-Resolution order for each path: `--cli-flag` → `${VAR}_IMAGE` / `${VAR}_VIDEO`
-(stage-specific) → `${VAR}` (shared) → error if still unset.
-
-### Dataset layout
-
-**Stage 1 — image (SA-1B-style):**
+Path resolution order is:
 
 ```text
-{data_root}/
+CLI flag -> stage-specific env var -> shared env var -> error
+```
+
+For example, `training.train_image` resolves data root as
+`--data-root`, then `DATA_ROOT_IMAGE`, then `DATA_ROOT`.
+
+## Dataset Layout
+
+### Stage 1: Image Pretraining
+
+The image dataset uses an SA-1B-style folder layout:
+
+```text
+{DATA_ROOT_IMAGE}/
 ├── images/
 │   ├── img001.jpg
-│   └── ...
+│   └── img002.png
 └── masks/
-    ├── img001.png            # binary PNG, one mask per file
-    └── img001_2.png          # multi-object: append _{obj_id}
+    ├── img001.png
+    ├── img001_2.png
+    └── img002.png
 ```
 
-**Stage 2 — video (DAVIS / YouTube-VOS / SA-V layout):**
+Mask files are binary PNGs. Multiple masks for one image can be stored as
+`{image_id}_{object_id}.png`.
+
+### Stage 2: Video Fine-Tuning / Validation
+
+The video dataset uses DAVIS / YouTube-VOS / SA-V style directories:
 
 ```text
-{data_root}/
+{DATA_ROOT_VIDEO}/
 ├── JPEGImages/
 │   └── {video_id}/
 │       ├── 00000.jpg
-│       └── ...
+│       └── 00001.jpg
 └── Annotations/
     └── {video_id}/
-        ├── 00000.png         # palette PNG; pixel value = object id (0=bg)
-        └── ...
+        ├── 00000.png
+        └── 00001.png
 ```
 
-### Stage 1: image pretraining
+Annotation PNGs are palette or grayscale masks where `0` is background and each
+non-zero pixel value is an object id.
+
+## Model / Training Configs
+
+Training configs are Hydra config names under
+`efficient_track_anything/configs/training/`.
+
+| Variant | Image config | Video config | Resolution | Notes |
+| --- | --- | --- | --- | --- |
+| Tiny | `training/train_image_ti` | `training/train_video_ti` | 1024 | Lower VRAM |
+| Small | `training/train_image_s` | `training/train_video_s` | 1024 | Better quality |
+| Smoke | `training/_image_test` | `training/_video_test` | 512 | Quick sanity test |
+
+Architecture configs live in `efficient_track_anything/configs/efficienttam/`.
+For example, `training/train_image_ti` points at
+`configs/efficienttam/efficienttam_ti.yaml`.
+
+## Paper Recipe Notes
+
+The local configs follow the EfficientTAM paper as closely as this pipeline
+supports:
+
+- Stage 1 image pretraining: SA-1B-style images, 90k optimizer steps, LR `4e-4`,
+  inverse-square-root decay, 1k warmup, 5k cooldown, bf16 on CUDA, focal:dice
+  loss `20:1`.
+- Stage 2 video fine-tuning: 300k optimizer steps, encoder LR `6e-5`, other
+  module LR `3e-4`, cosine schedule, 15k warmup, loss `20:1:1:1`.
+- Optimizer: AdamW, betas `(0.9, 0.999)`, weight decay `0.1`, layer-wise decay
+  `0.8`, gradient clipping `0.1`.
+
+Important practical differences:
+
+- The paper uses global batch 256 on 256 A100-80G GPUs. On 2 GPUs, reduce
+  `train.batch_size`, `train.objects_per_image`, or `train.objects_per_clip` if
+  you hit OOM.
+- The paper mixes SA-V with a 10% SA-1B subset during full training. The current
+  Stage 2 loader trains on the video-layout dataset only.
+
+## Train
+
+### Two-GPU Training on GPU 0 and 1
+
+Use `torchrun` with `CUDA_VISIBLE_DEVICES=0,1`.
+
+Stage 1:
 
 ```bash
-# All paths can come from `.env`:
-python -m training.train_image --config training/train_image_s
-
-# Or pass them explicitly (overrides `.env`):
-python -m training.train_image \
-    --config training/train_image_s \
-    --data-root /path/to/sa1b_style_root \
-    --output-dir runs/image_s \
-    train.batch_size=4 train.epochs=10   # optional Hydra-style overrides
+CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 --module training.train_image \
+  --config training/train_image_ti
 ```
 
-Key flags:
-
-- `--config` — Hydra config name under `efficient_track_anything/configs/` (e.g. `training/train_image_s`).
-- `--resume <ckpt>` — resume the same stage (loads optimizer + scheduler too). Defaults to `$RESUME_IMAGE` / `$RESUME`.
-- `--overfit-one-batch` — single-batch smoke test; loss should drop near zero in a few hundred steps.
-- Positional `key=value` args at the end are Hydra overrides for the training YAML (`train.batch_size=8`, `train.epochs=2`, …).
-- All hyperparameters live in [efficient_track_anything/configs/training/train_image_s.yaml](efficient_track_anything/configs/training/train_image_s.yaml) (or `train_image_ti.yaml` for the tiny variant).
-
-### Stage 2: video fine-tuning
+Stage 2:
 
 ```bash
-python -m training.train_video \
-    --config training/train_video_s \
-    --data-root /path/to/sav_or_davis_root \
-    --output-dir runs/video_s \
-    --init-from runs/image_s/image_final.pt
+CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 --module training.train_video \
+  --config training/train_video_ti \
+  --init-from runs/image_ti/image_final.pt
 ```
 
-`--init-from` seeds weights from the stage-1 checkpoint (memory_encoder / memory_attention keys load as random init since stage 1 doesn't train them). It defaults to `$INIT_FROM_VIDEO` / `$INIT_FROM` from `.env`.
+The scripts also read `.env`, so the path flags can be omitted when `.env` is
+filled in.
 
-Each video sample is an 8-frame clip with random stride; frame 0 gets a point or box prompt; a random subset of later frames receives a simulated correction click drawn from the model's own error region.
+### Explicit Paths
 
-### Checkpoints and crash safety
-
-Each epoch writes both `*_epoch_NNNN.pt` and a `*_latest.pt` pointer for easy resume. The writes are atomic (`tmp` + rename) so a kill / OOM mid-write cannot corrupt a checkpoint.
-
-On `KeyboardInterrupt` or any unhandled exception the trainer:
-
-1. prints the traceback to stderr,
-2. saves an emergency checkpoint to `*_interrupt.pt` and refreshes `*_latest.pt`,
-3. flushes the wandb run with `result/status = interrupted | crashed`,
-4. exits 1 only on crash (not on Ctrl-C).
-
-A non-finite loss (NaN / Inf) skips the optimizer step instead of poisoning every parameter, logs a warning to stdout, and records `train/nan_skip=1` to wandb.
-
-### Experiment tracking (Weights & Biases)
-
-Training auto-logs to W&B when `WANDB_API_KEY` is set in `.env` (or the process env). Without a key it prints one notice and runs normally — wandb is completely optional. What's logged:
-
-- **Config** — the full Hydra-composed YAML (`model.*`, `train.*`), CLI overrides, device, precision, and resolved path args.
-- **Process** — per step: `train/loss`, `train/lr`, `train/epoch`, plus each loss component (`train/focal`, `train/dice`, `train/iou_l1`, `train/obj_bce`). Per `log_every` steps: rolling `*_avg` values and throughput (`train/ips` for image, `train/clips_per_s` for video). Per epoch: `checkpoint/epoch` marker.
-- **Results** — written to the run summary: `result/status`, `result/final_checkpoint`, `result/steps`, `result/epochs`, and the last-epoch final loss + components.
-
-Add an optional `wandb:` block to a training YAML to customize:
-
-```yaml
-wandb:
-  project: efficient-tam
-  run_name: image_s_run01
-  tags: [stage1, paper]
+```bash
+CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 --module training.train_image \
+  --config training/train_image_s \
+  --data-root /data/sa1b_style \
+  --output-dir runs/image_s
 ```
 
-### Training recipe (matches paper / SAM2)
+```bash
+CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 --module training.train_video \
+  --config training/train_video_s \
+  --data-root /data/sav_or_davis \
+  --output-dir runs/video_s \
+  --init-from runs/image_s/image_final.pt
+```
 
-- **Losses:** focal (weight 20) + dice (1) on masks, L1 on IoU prediction (1), BCE on object-score (1).
-- **Best-of-3:** for multi-mask outputs, supervise the candidate with the lowest combined focal+dice loss.
-- **Optimizer:** AdamW with weight decay 0.1 (bias/LN excluded), layer-wise LR decay 0.8 on the image encoder.
-- **Schedule:** linear warmup (5% of steps) → cosine to 0.
-- **Precision:** bf16 autocast on CUDA, fp16 on MPS, fp32 on CPU.
-- **Gradient clipping:** 0.1 (SAM2 default).
+### Memory-Friendly Overrides
 
----
+Hydra-style overrides go at the end:
 
-## Evaluation (DAVIS-style J&F)
+```bash
+CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 --module training.train_image \
+  --config training/train_image_ti \
+  train.batch_size=1 train.objects_per_image=8 train.num_workers=2
+```
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 --module training.train_video \
+  --config training/train_video_ti \
+  train.batch_size=1 train.objects_per_clip=1 train.clip_len=4
+```
+
+Useful flags:
+
+- `--resume <path>`: resume optimizer, scheduler, epoch, and step.
+- `--init-from <path>`: load model weights only.
+- `--overfit-one-batch`: single-batch debugging mode.
+- `--max-steps N`: override the config step budget.
+- `--precision auto|bf16|fp16|fp32`: mixed precision mode.
+
+### Quick Smoke Pipeline
+
+`train.sh` runs the tiny 512 smoke configs on GPU 0 and 1, then validates:
+
+```bash
+NPROC_PER_NODE=2 CUDA_VISIBLE_DEVICES=0,1 ./train.sh
+```
+
+Set `DATA_ROOT_IMAGE`, `DATA_ROOT_VIDEO` and `OUTPUT_DIR_VIDEO` in `.env` before using the
+script. The script will automatically verify that the configured data directories and their required subdirectories (`images`/`masks` and `JPEGImages`/`Annotations`) exist before starting the pipeline.
+
+## Checkpoints
+
+Training writes:
+
+```text
+image_epoch_0000.pt
+image_latest.pt
+image_final.pt
+video_epoch_0000.pt
+video_latest.pt
+video_final.pt
+```
+
+Writes are atomic via `*.tmp` then rename. On interruption or crash, the trainer
+tries to write `image_interrupt.pt` or `video_interrupt.pt` and refresh
+`*_latest.pt`.
+
+In multi-GPU training, rank 0 writes checkpoints and W&B logs.
+
+## Validate
+
+Run DAVIS-style J&F validation after Stage 2:
 
 ```bash
 python -m tools.validate \
-    --config configs/efficienttam/efficienttam_s.yaml \
-    --ckpt runs/video_s/video_final.pt \
-    --val-root /path/to/DAVIS17/val \
-    --output-json results.json
+  --config configs/efficienttam/efficienttam_ti.yaml \
+  --ckpt runs/video_ti/video_final.pt \
+  --val-root /data/davis_or_sav \
+  --output-json runs/video_ti/results.json
 ```
 
-This prompts every annotated object in frame 0 with its GT mask, propagates through the clip, and reports per-video J / F / J&F plus the overall means. Run this after Stage 2 finishes to score the checkpoint you just trained.
+Quick subset:
 
-Flags:
+```bash
+python -m tools.validate \
+  --config configs/efficienttam/efficienttam_ti.yaml \
+  --ckpt runs/video_ti/video_final.pt \
+  --val-root /data/davis_or_sav \
+  --max-videos 5
+```
 
-- `--max-videos N` — evaluate a subset for quick iteration
-- `--output-json results.json` — dump per-video metrics
-
-The metric implementation is vendored from DAVIS 2017 (region IoU + boundary F-measure with disk-shaped dilation tolerance) and lives in [tools/jf_metric.py](tools/jf_metric.py).
-
----
+Validation prompts every object in frame 0 with the ground-truth mask, propagates
+through the sequence, and reports per-video `J`, `F`, and `J&F` plus overall
+means.
 
 ## Inference
 
-### Programmatic — single image
+### CLI: Image
+
+Create a prompt JSON:
+
+```json
+{"points": [[500, 300]], "labels": [1]}
+```
+
+Run inference:
+
+```bash
+python -m tools.infer --mode image \
+  --config configs/efficienttam/efficienttam_ti.yaml \
+  --ckpt runs/video_ti/video_final.pt \
+  --input /path/to/image.jpg \
+  --prompt prompt_image.json \
+  --output out_mask.png
+```
+
+Image prompts can be point, box, or mask:
+
+```json
+{"points": [[500, 300]], "labels": [1]}
+{"box": [120, 80, 640, 520]}
+{"mask": "/path/to/binary_mask.png"}
+```
+
+### CLI: Video
+
+Input is a directory of JPEG frames:
+
+```text
+/path/to/frames/
+├── 00000.jpg
+├── 00001.jpg
+└── ...
+```
+
+Prompt JSON:
+
+```json
+{
+  "objects": [
+    {"obj_id": 1, "frame_idx": 0, "points": [[500, 300]], "labels": [1]},
+    {"obj_id": 2, "frame_idx": 0, "box": [120, 80, 640, 520]}
+  ]
+}
+```
+
+Run:
+
+```bash
+python -m tools.infer --mode video \
+  --config configs/efficienttam/efficienttam_ti.yaml \
+  --ckpt runs/video_ti/video_final.pt \
+  --input /path/to/frames \
+  --prompt prompt_video.json \
+  --output out_masks
+```
+
+Outputs are binary PNG masks named like:
+
+```text
+out_masks/obj01_frame00000.png
+out_masks/obj01_frame00001.png
+```
+
+### Python: Image
 
 ```python
 import numpy as np
 from PIL import Image
+
 from efficient_track_anything.build_efficienttam import build_efficienttam
 from efficient_track_anything.efficienttam_image_predictor import EfficientTAMImagePredictor
 
-model = build_efficienttam("configs/efficienttam/efficienttam_s.yaml", "runs/video_s/video_final.pt")
+model = build_efficienttam(
+    "configs/efficienttam/efficienttam_ti.yaml",
+    ckpt_path="runs/video_ti/video_final.pt",
+)
 predictor = EfficientTAMImagePredictor(model)
-predictor.set_image(np.array(Image.open("examples/sf.jpg").convert("RGB")))
+predictor.set_image(np.array(Image.open("/path/to/image.jpg").convert("RGB")))
 
 masks, iou, _ = predictor.predict(
-    point_coords=np.array([[500, 300]]),
-    point_labels=np.array([1]),
+    point_coords=np.array([[500, 300]], dtype=np.float32),
+    point_labels=np.array([1], dtype=np.int32),
     multimask_output=True,
 )
 best = int(np.argmax(iou))
 Image.fromarray((masks[best] * 255).astype("uint8")).save("mask.png")
 ```
 
-### Programmatic — video tracking
+### Python: Video
 
 ```python
-import torch
 from efficient_track_anything.build_efficienttam import build_efficienttam_video_predictor
 
 predictor = build_efficienttam_video_predictor(
-    "configs/efficienttam/efficienttam_s.yaml",
-    "runs/video_s/video_final.pt",
+    "configs/efficienttam/efficienttam_ti.yaml",
+    "runs/video_ti/video_final.pt",
 )
-state = predictor.init_state("/path/to/frames/")          # dir of JPEGs
+state = predictor.init_state("/path/to/frames")
 
 predictor.add_new_points_or_box(
-    state, frame_idx=0, obj_id=1,
-    points=[[x, y]], labels=[1],
+    state,
+    frame_idx=0,
+    obj_id=1,
+    points=[[500, 300]],
+    labels=[1],
 )
 
 for frame_idx, obj_ids, mask_logits in predictor.propagate_in_video(state):
     masks = (mask_logits > 0).cpu().numpy()
-    # ... save / visualize ...
 ```
 
-### Headless batch inference (CLI)
+## Interactive Demos
 
 ```bash
-# image
-python -m tools.infer --mode image \
-    --config configs/efficienttam/efficienttam_s.yaml \
-    --ckpt runs/video_s/video_final.pt \
-    --input examples/sf.jpg \
-    --prompt prompt.json \
-    --output sf_mask.png
-
-# video (directory of JPEG frames)
-python -m tools.infer --mode video \
-    --config configs/efficienttam/efficienttam_s.yaml \
-    --ckpt runs/video_s/video_final.pt \
-    --input /path/to/frames/ \
-    --prompt prompt.json \
-    --output out_masks/
+python app_image.py
+python app.py
 ```
 
-**Prompt JSON — image mode** (any one of):
+`app_image.py` launches the image demo. `app.py` launches the video tracking
+demo. Both auto-pick CUDA, MPS, or CPU.
 
-```json
-{"points": [[x, y]], "labels": [1]}
-{"box": [x0, y0, x1, y1]}
-{"mask": "/path/to/binary.png"}
-```
-
-**Prompt JSON — video mode:**
-
-```json
-{"objects": [
-    {"obj_id": 1, "frame_idx": 0, "points": [[x, y]], "labels": [1]},
-    {"obj_id": 2, "frame_idx": 0, "box":    [x0, y0, x1, y1]},
-    {"obj_id": 3, "frame_idx": 0, "mask":   "/path/to/m.png"}
-]}
-```
-
-### Interactive demo (Gradio)
-
-The two `app*.py` scripts launch a Gradio UI for clicking/drawing prompts directly on images or videos:
-
-```bash
-python app_image.py          # image: point / box / segment-everything modes
-python app.py                # video: frame-by-frame tracking with click prompts
-```
-
-The video demo writes annotated frames + an MP4 to the working directory; the image demo overlays masks live in the browser. Both auto-pick CUDA / MPS / CPU.
-
-### Benchmark FPS
+## Benchmark
 
 ```bash
 python efficient_track_anything/benchmark.py
 ```
 
----
+## W&B Logging
+
+W&B is optional. If `WANDB_API_KEY` is empty, training runs normally without
+logging.
+
+You can customize runs in a training YAML:
+
+```yaml
+wandb:
+  project: efficient-tam
+  run_name: video_ti_run01
+  tags: [stage2, ti]
+```
+
+## Troubleshooting
+
+- `ModuleNotFoundError: torch`: activate the conda environment and install
+  `requirements.txt`.
+- CUDA OOM: lower `train.batch_size`, `train.objects_per_image`,
+  `train.objects_per_clip`, or `train.clip_len`.
+- No dataset found: check that `images/masks` or `JPEGImages/Annotations` exist
+  under the selected data root.
+- Resume training: pass `--resume runs/.../*_latest.pt`.
+- Disable W&B even with a key: set `WANDB_MODE=disabled`.
 
 ## Acknowledgements
 
 - [EfficientTAM](https://github.com/yformer/EfficientTAM)
-- [SAM2](https://github.com/facebookresearch/sam2)
+- [SAM 2](https://github.com/facebookresearch/sam2)
 - [EfficientSAM](https://github.com/yformer/EfficientSAM)
 - [SAM](https://github.com/facebookresearch/segment-anything)

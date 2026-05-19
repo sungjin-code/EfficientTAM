@@ -1,3 +1,5 @@
+# @package _global_
+
 # Stage 2 (video finetuning) — efficienttam_s.
 # Paper trains 3 masks per video frame; we expose `objects_per_clip` to match.
 model:
@@ -6,8 +8,9 @@ model:
     - "++model.sam_mask_decoder_extra_args=null"
 
 train:
-  epochs: 40
-  batch_size: 2
+  epochs: 1000000
+  max_steps: 300000
+  batch_size: 2                 # per GPU; paper global batch is 256
   num_workers: 2
 
   # Paper LRs (same as image stage)
@@ -15,7 +18,8 @@ train:
   head_lr: 3.0e-4
   layerwise_decay: 0.8
   weight_decay: 0.1
-  warmup_pct: 0.05
+  scheduler: cosine
+  warmup_steps: 15000
   grad_clip: 0.1
 
   focal_w: 20.0

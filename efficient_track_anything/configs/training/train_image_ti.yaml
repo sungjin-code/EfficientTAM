@@ -1,3 +1,5 @@
+# @package _global_
+
 # Stage 1 (image pretraining) — efficienttam_ti.
 model:
   config_file: configs/efficienttam/efficienttam_ti.yaml
@@ -5,20 +7,23 @@ model:
     - "++model.sam_mask_decoder_extra_args=null"
 
 train:
-  epochs: 90
-  batch_size: 16              # smaller backbone fits more samples
+  epochs: 1000000
+  max_steps: 90000
+  batch_size: 16              # per GPU; paper global batch is 256
   num_workers: 4
-  backbone_lr: 6.0e-5
-  head_lr: 3.0e-4
+  backbone_lr: 4.0e-4
+  head_lr: 4.0e-4
   layerwise_decay: 0.8
   weight_decay: 0.1
-  warmup_pct: 0.05
+  scheduler: inverse_sqrt
+  warmup_steps: 1000
+  cooldown_steps: 5000
   grad_clip: 0.1
 
   focal_w: 20.0
   dice_w: 1.0
-  iou_w: 1.0
-  obj_w: 1.0
+  iou_w: 0.0
+  obj_w: 0.0
 
   image_size: 1024
   prompt_mode: mixed
@@ -33,7 +38,7 @@ train:
   affine_degree: 25.0
   affine_shear: 20.0
 
-  objects_per_image: 8
+  objects_per_image: 64
 
   log_every: 20
   seed: 0

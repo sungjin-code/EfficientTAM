@@ -1,8 +1,9 @@
-"""Optimizer, parameter groups, and LR schedule for EfficientTAM training.
+"""Optimizer, parameter groups, and LR schedules for EfficientTAM training.
 
 - AdamW with weight decay 0.1 (no decay on bias / norm / position-embedding buffers).
 - Layer-wise LR decay on the image encoder backbone (depth-indexed).
-- Linear warmup -> cosine to zero.
+- Stage 1 paper schedule: linear warmup -> reciprocal sqrt -> linear cooldown.
+- Stage 2 paper schedule: linear warmup -> cosine to zero.
 """
 
 from __future__ import annotations
@@ -29,6 +30,8 @@ _BLOCK_PATTERN = re.compile(r"image_encoder\..*?(?:blocks|layers)\.(\d+)\.")
 
 def _backbone_depth(name: str) -> int | None:
     """Return the block index of a parameter inside the image encoder, else None."""
+    if name.startswith("module."):
+        name = name[len("module.") :]
     if not name.startswith("image_encoder."):
         return None
     m = _BLOCK_PATTERN.search(name)
@@ -141,10 +144,16 @@ class WarmupCosineSchedule:
         optimizer: torch.optim.Optimizer,
         total_steps: int,
         warmup_pct: float = 0.05,
+        warmup_steps: int | None = None,
     ):
         self.optimizer = optimizer
         self.total_steps = max(1, total_steps)
-        self.warmup_steps = max(1, int(self.total_steps * warmup_pct))
+        self.warmup_steps = max(
+            1,
+            int(warmup_steps)
+            if warmup_steps is not None
+            else int(self.total_steps * warmup_pct),
+        )
         self.step_num = 0
         self.base_lrs = [g["lr"] for g in optimizer.param_groups]
 
@@ -169,6 +178,85 @@ class WarmupCosineSchedule:
     def load_state_dict(self, sd: dict) -> None:
         self.step_num = sd["step_num"]
         self.base_lrs = sd["base_lrs"]
+
+
+class WarmupInverseSqrtCooldownSchedule:
+    """Linear warmup, reciprocal-sqrt decay, then linear cooldown.
+
+    This matches the EfficientTAM image-pretraining recipe: 1k warmup, inverse
+    square-root decay, and 5k cooldown over 90k total optimizer steps.
+    """
+
+    def __init__(
+        self,
+        optimizer: torch.optim.Optimizer,
+        total_steps: int,
+        warmup_steps: int = 1000,
+        cooldown_steps: int = 5000,
+    ):
+        self.optimizer = optimizer
+        self.total_steps = max(1, int(total_steps))
+        self.warmup_steps = max(1, int(warmup_steps))
+        self.cooldown_steps = max(0, int(cooldown_steps))
+        self.step_num = 0
+        self.base_lrs = [g["lr"] for g in optimizer.param_groups]
+
+    def _factor(self) -> float:
+        step = max(1, self.step_num)
+        if step <= self.warmup_steps:
+            return step / self.warmup_steps
+        factor = (self.warmup_steps**0.5) / (step**0.5)
+        cooldown_start = self.total_steps - self.cooldown_steps
+        if self.cooldown_steps > 0 and step > cooldown_start:
+            remaining = max(0, self.total_steps - step)
+            factor *= remaining / self.cooldown_steps
+        return max(0.0, factor)
+
+    def step(self) -> float:
+        self.step_num += 1
+        f = self._factor()
+        for g, base in zip(self.optimizer.param_groups, self.base_lrs):
+            g["lr"] = base * f
+        return f
+
+    def state_dict(self) -> dict:
+        return {
+            "step_num": self.step_num,
+            "base_lrs": self.base_lrs,
+            "total_steps": self.total_steps,
+            "warmup_steps": self.warmup_steps,
+            "cooldown_steps": self.cooldown_steps,
+        }
+
+    def load_state_dict(self, sd: dict) -> None:
+        self.step_num = sd["step_num"]
+        self.base_lrs = sd["base_lrs"]
+        self.total_steps = sd.get("total_steps", self.total_steps)
+        self.warmup_steps = sd.get("warmup_steps", self.warmup_steps)
+        self.cooldown_steps = sd.get("cooldown_steps", self.cooldown_steps)
+
+
+def build_scheduler(
+    optimizer: torch.optim.Optimizer,
+    train_cfg: dict,
+    total_steps: int,
+):
+    name = train_cfg.get("scheduler", "cosine")
+    if name == "inverse_sqrt":
+        return WarmupInverseSqrtCooldownSchedule(
+            optimizer,
+            total_steps=total_steps,
+            warmup_steps=train_cfg.get("warmup_steps", 1000),
+            cooldown_steps=train_cfg.get("cooldown_steps", 5000),
+        )
+    if name == "cosine":
+        return WarmupCosineSchedule(
+            optimizer,
+            total_steps=total_steps,
+            warmup_pct=train_cfg.get("warmup_pct", 0.05),
+            warmup_steps=train_cfg.get("warmup_steps"),
+        )
+    raise ValueError(f"Unknown LR scheduler: {name}")
 
 
 def clip_grad_norm(

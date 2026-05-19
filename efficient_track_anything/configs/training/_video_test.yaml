@@ -1,3 +1,5 @@
+# @package _global_
+
 # Stage 2 (video finetuning) — Minimal test config for VRAM reduction
 model:
   config_file: configs/efficienttam/efficienttam_ti_512x512.yaml

@@ -20,6 +20,7 @@ import torch
 import torch.nn.functional as F
 
 from training.data.prompts import PromptSampler
+from training.distributed import average_gradients, unwrap_model
 from training.losses import MultiStepLoss
 from training.optim import WarmupCosineSchedule, clip_grad_norm
 from training.wandb_utils import WandbLogger
@@ -62,6 +63,7 @@ def forward_clip(
     loss_fn: MultiStepLoss,
     run_mem_encoder: bool,
 ) -> ClipOutput:
+    model = unwrap_model(model)
     B, T = frames.shape[:2]
     device = frames.device
     H = frames.shape[-2]
@@ -315,6 +317,7 @@ def train_one_epoch_image(
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
+        average_gradients(model)
         if grad_clip > 0:
             clip_grad_norm(model.parameters(), grad_clip)
         optimizer.step()
@@ -446,6 +449,7 @@ def train_one_epoch_video(
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
+        average_gradients(model)
         if grad_clip > 0:
             clip_grad_norm(model.parameters(), grad_clip)
         optimizer.step()
@@ -501,6 +505,7 @@ def save_checkpoint(
     A kill / disk-full / oom during torch.save would otherwise leave a
     truncated .pt that breaks `--resume`.
     """
+    model = unwrap_model(model)
     payload = {
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),

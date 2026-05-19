@@ -1,3 +1,4 @@
+import os
 from typing import Dict, Optional, Tuple
 
 import gradio as gr
@@ -37,13 +38,14 @@ BOX_PROMPT_MODE = "box prompt"
 MASK_GENERATION_MODE = "mask generation"
 MODE_NAMES = [BOX_PROMPT_MODE, MASK_GENERATION_MODE]
 
-EXAMPLES = [
-    ["efficienttam-s", MASK_GENERATION_MODE, "examples/mario_1.jpg", None],
-    ["efficienttam-s", MASK_GENERATION_MODE, "examples/sf.jpg", None],
-    ["efficienttam-s", MASK_GENERATION_MODE, "examples/toy.jpg", None],
-    ["efficienttam-s", MASK_GENERATION_MODE, "examples/mario_2.jpg", None],
-    ["efficienttam-s", MASK_GENERATION_MODE, "examples/bill.jpg", None],
-]
+def get_examples(checkpoint):
+    return [
+        [checkpoint, MASK_GENERATION_MODE, "examples/mario_1.jpg", None],
+        [checkpoint, MASK_GENERATION_MODE, "examples/sf.jpg", None],
+        [checkpoint, MASK_GENERATION_MODE, "examples/toy.jpg", None],
+        [checkpoint, MASK_GENERATION_MODE, "examples/mario_2.jpg", None],
+        [checkpoint, MASK_GENERATION_MODE, "examples/bill.jpg", None],
+    ]
 
 DEVICE = "cuda"
 
@@ -63,7 +65,9 @@ CHECKPOINTS = {
         "./checkpoints/efficienttam_ti.pt",
     ],
 }
-
+AVAILABLE_CHECKPOINTS = [name for name in CHECKPOINT_NAMES if os.path.exists(CHECKPOINTS[name][1])]
+if not AVAILABLE_CHECKPOINTS:
+    raise FileNotFoundError("No checkpoint files found in ./checkpoints directory. Please download at least one.")
 
 def load_models(
     device: torch.device,
@@ -72,7 +76,8 @@ def load_models(
 ]:
     image_predictors = {}
     mask_generators = {}
-    for key, (config, checkpoint) in CHECKPOINTS.items():
+    for key in AVAILABLE_CHECKPOINTS:
+        config, checkpoint = CHECKPOINTS[key]
         model = build_efficienttam(config, checkpoint)
         image_predictors[key] = EfficientTAMImagePredictor(efficienttam_model=model)
         mask_generators[key] = EfficientTAMAutomaticMaskGenerator(
@@ -142,8 +147,8 @@ with gr.Blocks() as demo:
     gr.Markdown(MARKDOWN)
     with gr.Row():
         checkpoint_dropdown_component = gr.Dropdown(
-            choices=CHECKPOINT_NAMES,
-            value=CHECKPOINT_NAMES[0],
+            choices=AVAILABLE_CHECKPOINTS,
+            value=AVAILABLE_CHECKPOINTS[0] if AVAILABLE_CHECKPOINTS else None,
             label="Checkpoint",
             info="Select a efficient track anything checkpoint to use.",
             interactive=True,
@@ -168,7 +173,7 @@ with gr.Blocks() as demo:
             image_output_component = gr.Image(type="pil", label="Image Output")
     with gr.Row():
         gr.Examples(
-            examples=EXAMPLES,
+            examples=get_examples(AVAILABLE_CHECKPOINTS[0] if AVAILABLE_CHECKPOINTS else CHECKPOINT_NAMES[0]),
             inputs=[
                 checkpoint_dropdown_component,
                 mode_dropdown_component,

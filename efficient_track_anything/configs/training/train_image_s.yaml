@@ -1,8 +1,10 @@
+# @package _global_
+
 # Stage 1 (image pretraining) — efficienttam_s.
-# Paper §experimental setup: AdamW (β=0.9,0.999), backbone_lr=6e-5, head_lr=3e-4,
-# batch=256, 300k steps, image_size=1024, loss ratio 20:1:1:1, 64 masks/image.
-# On single-GPU the paper batch is unreachable — set `objects_per_image` and
-# `batch_size` to whatever your memory allows, and use `--max-steps` from the CLI.
+# Paper §5.1 pretraining: SA-1B, 90k optimizer steps, global batch 256,
+# AdamW β=(0.9,0.999), initial LR 4e-4, inverse-sqrt decay, 1k warmup,
+# 5k cooldown, wd=0.1, layer-wise decay 0.8, bf16, focal:dice=20:1,
+# image_size=1024, max 64 masks/image.
 model:
   config_file: configs/efficienttam/efficienttam_s.yaml
   overrides:
@@ -11,21 +13,24 @@ model:
 
 train:
   # Optimization (paper-aligned)
-  epochs: 90                  # used only if --max-steps is not given
-  batch_size: 8               # paper uses 256 across many GPUs
+  epochs: 1000000             # max_steps is the real budget
+  max_steps: 90000
+  batch_size: 8               # per GPU; paper global batch is 256
   num_workers: 4
-  backbone_lr: 6.0e-5         # paper value
-  head_lr: 3.0e-4             # paper value
+  backbone_lr: 4.0e-4
+  head_lr: 4.0e-4
   layerwise_decay: 0.8
   weight_decay: 0.1
-  warmup_pct: 0.05
+  scheduler: inverse_sqrt
+  warmup_steps: 1000
+  cooldown_steps: 5000
   grad_clip: 0.1
 
-  # Loss weights — paper §experimental setup (20:1:1:1)
+  # Stage-1 pretraining supervises mask prediction only: focal:dice=20:1.
   focal_w: 20.0
   dice_w: 1.0
-  iou_w: 1.0
-  obj_w: 1.0
+  iou_w: 0.0
+  obj_w: 0.0
 
   # Data / prompts
   image_size: 1024
@@ -42,8 +47,7 @@ train:
   affine_degree: 25.0
   affine_shear: 20.0
 
-  # Multi-object batching: paper trains 64 masks/image; raise as memory permits.
-  objects_per_image: 8
+  objects_per_image: 64
 
   log_every: 20
   seed: 0

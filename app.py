@@ -272,44 +272,29 @@ def show_box(box, ax):
     )
 
 
+CHECKPOINTS_MAP = {
+    "efficienttam_s": ("configs/efficienttam/efficienttam_s.yaml", "./checkpoints/efficienttam_s.pt"),
+    "efficienttam_ti": ("configs/efficienttam/efficienttam_ti.yaml", "./checkpoints/efficienttam_ti.pt"),
+    "efficienttam_s_512x512": ("configs/efficienttam/efficienttam_s_512x512.yaml", "./checkpoints/efficienttam_s_512x512.pt"),
+    "efficienttam_ti_512x512": ("configs/efficienttam/efficienttam_ti_512x512.yaml", "./checkpoints/efficienttam_ti_512x512.pt"),
+    "efficienttam_s_1": ("configs/efficienttam/efficienttam_s_1.yaml", "./checkpoints/efficienttam_s_1.pt"),
+    "efficienttam_s_2": ("configs/efficienttam/efficienttam_s_2.yaml", "./checkpoints/efficienttam_s_2.pt"),
+    "efficienttam_ti_1": ("configs/efficienttam/efficienttam_ti_1.yaml", "./checkpoints/efficienttam_ti_1.pt"),
+    "efficienttam_ti_2": ("configs/efficienttam/efficienttam_ti_2.yaml", "./checkpoints/efficienttam_ti_2.pt"),
+}
+
+AVAILABLE_CHECKPOINTS = [name for name, (cfg, ckpt) in CHECKPOINTS_MAP.items() if os.path.exists(ckpt)]
+if not AVAILABLE_CHECKPOINTS:
+    raise FileNotFoundError("No checkpoint files found in ./checkpoints directory. Please download at least one.")
+
+
 def load_model(checkpoint):
-    # Load model accordingly to user's choice
-    if checkpoint == "efficienttam_s":
-        efficienttam_checkpoint = "./checkpoints/efficienttam_s.pt"
-        model_cfg = "configs/efficienttam/efficienttam_s.yaml"
+    if checkpoint in CHECKPOINTS_MAP:
+        model_cfg, efficienttam_checkpoint = CHECKPOINTS_MAP[checkpoint]
         return [efficienttam_checkpoint, model_cfg]
-    elif checkpoint == "efficienttam_ti":
-        efficienttam_checkpoint = "./checkpoints/efficienttam_ti.pt"
-        model_cfg = "configs/efficienttam/efficienttam_ti.yaml"
-        return [efficienttam_checkpoint, model_cfg]
-    elif checkpoint == "efficienttam_s_512x512":
-        efficienttam_checkpoint = "./checkpoints/efficienttam_s_512x512.pt"
-        model_cfg = "configs/efficienttam/efficienttam_s_512x512.yaml"
-        return [efficienttam_checkpoint, model_cfg]
-    elif checkpoint == "efficienttam_ti_512x512":
-        efficienttam_checkpoint = "./checkpoints/efficienttam_ti_512x512.pt"
-        model_cfg = "configs/efficienttam/efficienttam_ti_512x512.yaml"
-        return [efficienttam_checkpoint, model_cfg]
-    elif checkpoint == "efficienttam_s_1":
-        efficienttam_checkpoint = "./checkpoints/efficienttam_s_1.pt"
-        model_cfg = "configs/efficienttam/efficienttam_s_1.yaml"
-        return [efficienttam_checkpoint, model_cfg]
-    elif checkpoint == "efficienttam_s_2":
-        efficienttam_checkpoint = "./checkpoints/efficienttam_s_2.pt"
-        model_cfg = "configs/efficienttam/efficienttam_s_2.yaml"
-        return [efficienttam_checkpoint, model_cfg]
-    elif checkpoint == "efficienttam_ti_1":
-        efficienttam_checkpoint = "./checkpoints/efficienttam_ti_1.pt"
-        model_cfg = "configs/efficienttam/efficienttam_ti_1.yaml"
-        return [efficienttam_checkpoint, model_cfg]
-    elif checkpoint == "efficienttam_ti_2":
-        efficienttam_checkpoint = "./checkpoints/efficienttam_ti_2.pt"
-        model_cfg = "configs/efficienttam/efficienttam_ti_2.yaml"
-        return [efficienttam_checkpoint, model_cfg]
-    else:
-        efficienttam_checkpoint = "./checkpoints/efficienttam_s_512x512.pt"
-        model_cfg = "configs/efficienttam/efficienttam_s_512x512.yaml"
-        return [efficienttam_checkpoint, model_cfg]
+    # Fallback to the first available if not found
+    model_cfg, efficienttam_checkpoint = CHECKPOINTS_MAP[AVAILABLE_CHECKPOINTS[0]]
+    return [efficienttam_checkpoint, model_cfg]
 
 
 def get_mask_efficienttam_process(
@@ -629,17 +614,8 @@ with gr.Blocks() as demo:
                 with gr.Row():
                     checkpoint = gr.Dropdown(
                         label="Checkpoint",
-                        choices=[
-                            "efficienttam_s",
-                            "efficienttam_ti",
-                            "efficienttam_s_512x512",
-                            "efficienttam_ti_512x512",
-                            "efficienttam_s_1",
-                            "efficienttam_s_2",
-                            "efficienttam_ti_1",
-                            "efficienttam_ti_2",
-                        ],
-                        value="efficienttam_s_512x512",
+                        choices=AVAILABLE_CHECKPOINTS,
+                        value=AVAILABLE_CHECKPOINTS[0] if AVAILABLE_CHECKPOINTS else None,
                     )
                     submit_btn = gr.Button("Segment", size="lg")
 

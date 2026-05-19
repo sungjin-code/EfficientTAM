@@ -23,9 +23,11 @@ import torch
 from hydra import compose
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 import efficient_track_anything  # noqa: F401  (initializes Hydra config module)
 from efficient_track_anything.build_efficienttam import build_efficienttam
+from training.distributed import broadcast_model, cleanup_distributed, init_distributed
 from training.data.prompts import PromptSampler
 from training.data.video_dataset import VideoSegmentationDataset, collate_video_batch
 from training.engine import (
@@ -35,13 +37,13 @@ from training.engine import (
     train_one_epoch_video,
 )
 from training.losses import LossWeights, MultiStepLoss
-from training.optim import WarmupCosineSchedule, build_optimizer
+from training.optim import build_optimizer, build_scheduler
 from training.wandb_utils import load_dotenv, make_logger
 
 
-def pick_device() -> torch.device:
+def pick_device(local_rank: int = 0) -> torch.device:
     if torch.cuda.is_available():
-        return torch.device("cuda")
+        return torch.device(f"cuda:{local_rank}")
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
@@ -103,6 +105,7 @@ def _load_cfg(config_name: str, overrides: list[str]) -> dict:
 
 
 def main() -> None:
+    dist_info = init_distributed()
     args = parse_args()
     missing = [
         name
@@ -118,9 +121,19 @@ def main() -> None:
     cfg = _load_cfg(args.config, args.overrides)
     train_cfg = cfg["train"]
     model_cfg = cfg["model"]
+    effective_max_steps = args.max_steps
+    if effective_max_steps is None:
+        effective_max_steps = train_cfg.get("max_steps")
 
-    device = pick_device()
-    print(f"[train_video] device={device}")
+    device = pick_device(dist_info.local_rank)
+    if dist_info.is_main:
+        print(
+            f"[train_video] device={device} distributed={dist_info.enabled} "
+            f"world_size={dist_info.world_size}"
+        )
+    torch.manual_seed(train_cfg.get("seed", 0))
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(train_cfg.get("seed", 0))
 
     overrides = list(model_cfg.get("overrides", []))
     overrides.append("++model.compile_image_encoder=false")
@@ -135,6 +148,7 @@ def main() -> None:
     )
     if args.init_from is not None:
         load_checkpoint(model, args.init_from, weights_only_into_model=True)
+    broadcast_model(model, dist_info)
 
     prompt_sampler = PromptSampler(
         mode=train_cfg.get("prompt_mode", "mixed"),
@@ -162,10 +176,16 @@ def main() -> None:
         objects_per_clip=train_cfg.get("objects_per_clip", 1),
         seed=train_cfg.get("seed", 0),
     )
+    sampler = (
+        DistributedSampler(dataset, shuffle=True, drop_last=True)
+        if dist_info.enabled
+        else None
+    )
     loader = DataLoader(
         dataset,
         batch_size=train_cfg["batch_size"],
-        shuffle=True,
+        shuffle=(sampler is None),
+        sampler=sampler,
         num_workers=train_cfg.get("num_workers", 2),
         collate_fn=collate_video_batch,
         drop_last=True,
@@ -173,7 +193,7 @@ def main() -> None:
     )
 
     steps_per_epoch = max(1, len(loader))
-    total_steps = train_cfg["epochs"] * steps_per_epoch
+    total_steps = effective_max_steps or (train_cfg["epochs"] * steps_per_epoch)
 
     optimizer = build_optimizer(
         model,
@@ -182,11 +202,7 @@ def main() -> None:
         layerwise_decay=train_cfg.get("layerwise_decay", 0.8),
         weight_decay=train_cfg.get("weight_decay", 0.1),
     )
-    scheduler = WarmupCosineSchedule(
-        optimizer,
-        total_steps=total_steps,
-        warmup_pct=train_cfg.get("warmup_pct", 0.05),
-    )
+    scheduler = build_scheduler(optimizer, train_cfg, total_steps=total_steps)
 
     loss_fn = MultiStepLoss(
         LossWeights(
@@ -207,30 +223,37 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     logger = make_logger()
-    logger.init(
-        wandb_cfg=cfg.get("wandb"),
-        run_config={
-            "stage": "video",
-            "config_name": args.config,
-            "config_overrides": args.overrides,
-            "output_dir": str(out_dir),
-            "device": str(device),
-            "precision": args.precision,
-            "max_steps": args.max_steps,
-            "init_from": args.init_from,
-            "model": model_cfg,
-            "train": train_cfg,
-        },
-        default_run_name=f"video_{out_dir.name}",
-    )
+    if dist_info.is_main:
+        logger.init(
+            wandb_cfg=cfg.get("wandb"),
+            run_config={
+                "stage": "video",
+                "config_name": args.config,
+                "config_overrides": args.overrides,
+                "output_dir": str(out_dir),
+                "device": str(device),
+                "precision": args.precision,
+                "max_steps": effective_max_steps,
+                "init_from": args.init_from,
+                "distributed": dist_info.enabled,
+                "world_size": dist_info.world_size,
+                "per_gpu_batch_size": train_cfg["batch_size"],
+                "global_batch_size": train_cfg["batch_size"] * dist_info.world_size,
+                "model": model_cfg,
+                "train": train_cfg,
+            },
+            default_run_name=f"video_{out_dir.name}",
+        )
 
     latest_path = out_dir / "video_latest.pt"
     last_epoch_result: dict = {}
     exit_status = "ok"
     try:
         for epoch in range(state.epoch, train_cfg["epochs"]):
-            if args.max_steps is not None and state.step >= args.max_steps:
+            if effective_max_steps is not None and state.step >= effective_max_steps:
                 break
+            if sampler is not None:
+                sampler.set_epoch(epoch)
             state.epoch = epoch
             last_epoch_result = train_one_epoch_video(
                 model=model,
@@ -244,15 +267,16 @@ def main() -> None:
                 grad_clip=train_cfg.get("grad_clip", 0.1),
                 log_every=train_cfg.get("log_every", 5),
                 overfit_one_batch=args.overfit_one_batch,
-                max_steps=args.max_steps,
+                max_steps=effective_max_steps,
                 precision=args.precision,
                 logger=logger,
             )
-            ckpt_path = out_dir / f"video_epoch_{epoch:04d}.pt"
-            save_checkpoint(model, optimizer, scheduler, str(ckpt_path), state)
-            save_checkpoint(model, optimizer, scheduler, str(latest_path), state)
-            print(f"[train_video] saved {ckpt_path}")
-            logger.log({"checkpoint/epoch": epoch}, step=state.step)
+            if dist_info.is_main:
+                ckpt_path = out_dir / f"video_epoch_{epoch:04d}.pt"
+                save_checkpoint(model, optimizer, scheduler, str(ckpt_path), state)
+                save_checkpoint(model, optimizer, scheduler, str(latest_path), state)
+                print(f"[train_video] saved {ckpt_path}")
+                logger.log({"checkpoint/epoch": epoch}, step=state.step)
     except KeyboardInterrupt:
         exit_status = "interrupted"
         print("[train_video] KeyboardInterrupt — saving emergency checkpoint")
@@ -262,33 +286,37 @@ def main() -> None:
         traceback.print_exc()
     finally:
         if exit_status != "ok":
-            try:
-                emergency = out_dir / "video_interrupt.pt"
-                save_checkpoint(model, optimizer, scheduler, str(emergency), state)
-                save_checkpoint(model, optimizer, scheduler, str(latest_path), state)
-                print(f"[train_video] emergency checkpoint saved at {emergency}")
-            except Exception:
-                print("[train_video] emergency save FAILED", file=sys.stderr)
-                traceback.print_exc()
+            if dist_info.is_main:
+                try:
+                    emergency = out_dir / "video_interrupt.pt"
+                    save_checkpoint(model, optimizer, scheduler, str(emergency), state)
+                    save_checkpoint(model, optimizer, scheduler, str(latest_path), state)
+                    print(f"[train_video] emergency checkpoint saved at {emergency}")
+                except Exception:
+                    print("[train_video] emergency save FAILED", file=sys.stderr)
+                    traceback.print_exc()
 
     if exit_status == "ok":
         final_path = out_dir / "video_final.pt"
-        save_checkpoint(model, optimizer, scheduler, str(final_path), state)
-        save_checkpoint(model, optimizer, scheduler, str(latest_path), state)
-        print(f"[train_video] done. final={final_path}")
+        if dist_info.is_main:
+            save_checkpoint(model, optimizer, scheduler, str(final_path), state)
+            save_checkpoint(model, optimizer, scheduler, str(latest_path), state)
+            print(f"[train_video] done. final={final_path}")
     else:
         final_path = latest_path
 
-    logger.summary(
-        {
-            "result/status": exit_status,
-            "result/final_checkpoint": str(final_path),
-            "result/steps": state.step,
-            "result/epochs": state.epoch + 1,
-            **{f"result/{k}": v for k, v in last_epoch_result.items()},
-        }
-    )
-    logger.finish()
+    if dist_info.is_main:
+        logger.summary(
+            {
+                "result/status": exit_status,
+                "result/final_checkpoint": str(final_path),
+                "result/steps": state.step,
+                "result/epochs": state.epoch + 1,
+                **{f"result/{k}": v for k, v in last_epoch_result.items()},
+            }
+        )
+        logger.finish()
+    cleanup_distributed(dist_info)
     if exit_status == "crashed":
         sys.exit(1)
 

@@ -7,6 +7,7 @@ output_first_frame.jpg
 frames_*
 notebooks/output_*
 outputs/
+/sample*
 
 # sample media (large binary assets)
 figs/
@@ -28,6 +29,9 @@ __pycache__/
 .ruff_cache/
 .vscode/
 .claude/
+.agents/
+.codex/
+.gemini
 CLAUDE.md
-AGENT.md
+AGENTS.md
 GEMINI.md

@@ -1,3 +1,5 @@
+# @package _global_
+
 # Stage 2 (video finetuning) — efficienttam_ti.
 model:
   config_file: configs/efficienttam/efficienttam_ti.yaml
@@ -5,15 +7,17 @@ model:
     - "++model.sam_mask_decoder_extra_args=null"
 
 train:
-  epochs: 40
-  batch_size: 4
+  epochs: 1000000
+  max_steps: 300000
+  batch_size: 4                 # per GPU; paper global batch is 256
   num_workers: 2
 
   backbone_lr: 6.0e-5
   head_lr: 3.0e-4
   layerwise_decay: 0.8
   weight_decay: 0.1
-  warmup_pct: 0.05
+  scheduler: cosine
+  warmup_steps: 15000
   grad_clip: 0.1
 
   focal_w: 20.0
