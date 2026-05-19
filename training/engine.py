@@ -9,7 +9,10 @@ inference predictor.
 
 from __future__ import annotations
 
+import math
+import os
 import time
+import traceback
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
@@ -191,6 +194,18 @@ class TrainState:
     epoch: int = 0
 
 
+def _aggregate_clip_metrics(per_frame: list[dict]) -> dict:
+    """Average per-frame loss components (returned by MultiStepLoss) into scalars."""
+    if not per_frame:
+        return {}
+    keys = list(per_frame[0].keys())
+    out: dict[str, float] = {}
+    for k in keys:
+        vals = [float(m[k].detach().item()) for m in per_frame]
+        out[k] = sum(vals) / len(vals)
+    return out
+
+
 def _autocast(device: torch.device, precision: str = "auto"):
     """Return an autocast context.
 
@@ -232,9 +247,15 @@ def train_one_epoch_image(
     """One pass over the image loader. Each batch is a T=1 clip."""
     model.train()
     fixed_batch = None
-    running = {"loss": 0.0, "n": 0}
+    running: dict[str, float] = {"loss": 0.0, "n": 0.0}
+    component_keys = ("focal", "dice", "iou_l1", "obj_bce")
+    for k in component_keys:
+        running[k] = 0.0
     t_start = time.time()
     loss = torch.zeros((), device=device)
+    last_components: dict[str, float] = {}
+    consecutive_nan = 0
+    MAX_CONSECUTIVE_NAN = 50
     for batch in loader:
         if max_steps is not None and state.step >= max_steps:
             break
@@ -272,6 +293,26 @@ def train_one_epoch_image(
             )
             loss = out.total_loss
 
+        # NaN/Inf guard — a poisoned step corrupts every param via optimizer.step.
+        step_loss = float(loss.detach().item())
+        if not math.isfinite(step_loss):
+            consecutive_nan += 1
+            print(
+                f"[image] WARNING non-finite loss={step_loss} at step={state.step} "
+                f"epoch={state.epoch} — skipping optimizer step "
+                f"({consecutive_nan}/{MAX_CONSECUTIVE_NAN} consecutive)"
+            )
+            optimizer.zero_grad(set_to_none=True)
+            if logger is not None and logger.enabled:
+                logger.log({"train/nan_skip": 1.0}, step=state.step)
+            if consecutive_nan >= MAX_CONSECUTIVE_NAN:
+                raise RuntimeError(
+                    f"[image] aborting: {consecutive_nan} consecutive non-finite losses. "
+                    "Check data, learning rate, or precision (try --precision fp32)."
+                )
+            continue
+        consecutive_nan = 0
+
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         if grad_clip > 0:
@@ -280,34 +321,45 @@ def train_one_epoch_image(
         scheduler.step()
         state.step += 1
 
-        step_loss = float(loss.detach().item())
         running["loss"] += step_loss
         running["n"] += 1
+        last_components = _aggregate_clip_metrics(out.per_frame_metrics)
+        for k in component_keys:
+            running[k] += last_components.get(k, 0.0)
         if logger is not None and logger.enabled:
-            logger.log(
-                {
-                    "train/loss": step_loss,
-                    "train/lr": optimizer.param_groups[0]["lr"],
-                    "train/epoch": state.epoch,
-                },
-                step=state.step,
-            )
+            payload = {
+                "train/loss": step_loss,
+                "train/lr": optimizer.param_groups[0]["lr"],
+                "train/epoch": state.epoch,
+            }
+            for k, v in last_components.items():
+                payload[f"train/{k}"] = v
+            logger.log(payload, step=state.step)
         if state.step % log_every == 0:
-            avg = running["loss"] / max(1, running["n"])
+            n = max(1, running["n"])
+            avg = running["loss"] / n
             lr = optimizer.param_groups[0]["lr"]
             elapsed = time.time() - t_start
             ips = running["n"] / max(elapsed, 1e-3)
+            comp_avgs = {k: running[k] / n for k in component_keys}
+            comp_str = " ".join(f"{k}={v:.4f}" for k, v in comp_avgs.items())
             print(
                 f"[image] step={state.step} epoch={state.epoch} loss={avg:.4f} "
-                f"lr={lr:.2e} ips={ips:.2f}"
+                f"{comp_str} lr={lr:.2e} ips={ips:.2f}"
             )
             if logger is not None and logger.enabled:
-                logger.log(
-                    {"train/loss_avg": avg, "train/ips": ips}, step=state.step
-                )
-            running = {"loss": 0.0, "n": 0}
+                payload = {"train/loss_avg": avg, "train/ips": ips}
+                for k, v in comp_avgs.items():
+                    payload[f"train/{k}_avg"] = v
+                logger.log(payload, step=state.step)
+            running = {"loss": 0.0, "n": 0.0}
+            for k in component_keys:
+                running[k] = 0.0
             t_start = time.time()
-    return {"final_loss": float(loss.detach().item())}
+    final = {"final_loss": float(loss.detach().item())}
+    for k, v in last_components.items():
+        final[f"final_{k}"] = v
+    return final
 
 
 def train_one_epoch_video(
@@ -328,9 +380,15 @@ def train_one_epoch_video(
 ) -> dict:
     model.train()
     fixed_batch = None
-    running = {"loss": 0.0, "n": 0}
+    running: dict[str, float] = {"loss": 0.0, "n": 0.0}
+    component_keys = ("focal", "dice", "iou_l1", "obj_bce")
+    for k in component_keys:
+        running[k] = 0.0
     t_start = time.time()
     loss = torch.zeros((), device=device)
+    last_components: dict[str, float] = {}
+    consecutive_nan = 0
+    MAX_CONSECUTIVE_NAN = 50
     for batch in loader:
         if max_steps is not None and state.step >= max_steps:
             break
@@ -367,6 +425,25 @@ def train_one_epoch_video(
             )
             loss = out.total_loss
 
+        step_loss = float(loss.detach().item())
+        if not math.isfinite(step_loss):
+            consecutive_nan += 1
+            print(
+                f"[video] WARNING non-finite loss={step_loss} at step={state.step} "
+                f"epoch={state.epoch} — skipping optimizer step "
+                f"({consecutive_nan}/{MAX_CONSECUTIVE_NAN} consecutive)"
+            )
+            optimizer.zero_grad(set_to_none=True)
+            if logger is not None and logger.enabled:
+                logger.log({"train/nan_skip": 1.0}, step=state.step)
+            if consecutive_nan >= MAX_CONSECUTIVE_NAN:
+                raise RuntimeError(
+                    f"[video] aborting: {consecutive_nan} consecutive non-finite losses. "
+                    "Check data, learning rate, or precision (try --precision fp32)."
+                )
+            continue
+        consecutive_nan = 0
+
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         if grad_clip > 0:
@@ -375,50 +452,65 @@ def train_one_epoch_video(
         scheduler.step()
         state.step += 1
 
-        step_loss = float(loss.detach().item())
         running["loss"] += step_loss
         running["n"] += 1
+        last_components = _aggregate_clip_metrics(out.per_frame_metrics)
+        for k in component_keys:
+            running[k] += last_components.get(k, 0.0)
         if logger is not None and logger.enabled:
-            logger.log(
-                {
-                    "train/loss": step_loss,
-                    "train/lr": optimizer.param_groups[0]["lr"],
-                    "train/epoch": state.epoch,
-                },
-                step=state.step,
-            )
+            payload = {
+                "train/loss": step_loss,
+                "train/lr": optimizer.param_groups[0]["lr"],
+                "train/epoch": state.epoch,
+            }
+            for k, v in last_components.items():
+                payload[f"train/{k}"] = v
+            logger.log(payload, step=state.step)
         if state.step % log_every == 0:
-            avg = running["loss"] / max(1, running["n"])
+            n = max(1, running["n"])
+            avg = running["loss"] / n
             lr = optimizer.param_groups[0]["lr"]
             elapsed = time.time() - t_start
             cps = running["n"] / max(elapsed, 1e-3)
+            comp_avgs = {k: running[k] / n for k in component_keys}
+            comp_str = " ".join(f"{k}={v:.4f}" for k, v in comp_avgs.items())
             print(
                 f"[video] step={state.step} epoch={state.epoch} loss={avg:.4f} "
-                f"lr={lr:.2e} clips/s={cps:.2f}"
+                f"{comp_str} lr={lr:.2e} clips/s={cps:.2f}"
             )
             if logger is not None and logger.enabled:
-                logger.log(
-                    {"train/loss_avg": avg, "train/clips_per_s": cps},
-                    step=state.step,
-                )
-            running = {"loss": 0.0, "n": 0}
+                payload = {"train/loss_avg": avg, "train/clips_per_s": cps}
+                for k, v in comp_avgs.items():
+                    payload[f"train/{k}_avg"] = v
+                logger.log(payload, step=state.step)
+            running = {"loss": 0.0, "n": 0.0}
+            for k in component_keys:
+                running[k] = 0.0
             t_start = time.time()
-    return {"final_loss": float(loss.detach().item())}
+    final = {"final_loss": float(loss.detach().item())}
+    for k, v in last_components.items():
+        final[f"final_{k}"] = v
+    return final
 
 
 def save_checkpoint(
     model: torch.nn.Module, optimizer, scheduler, path: str, state: TrainState
 ) -> None:
-    torch.save(
-        {
-            "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict() if scheduler is not None else None,
-            "step": state.step,
-            "epoch": state.epoch,
-        },
-        path,
-    )
+    """Atomic save: write to `<path>.tmp` first, then rename.
+
+    A kill / disk-full / oom during torch.save would otherwise leave a
+    truncated .pt that breaks `--resume`.
+    """
+    payload = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict() if scheduler is not None else None,
+        "step": state.step,
+        "epoch": state.epoch,
+    }
+    tmp_path = f"{path}.tmp"
+    torch.save(payload, tmp_path)
+    os.replace(tmp_path, path)
 
 
 def load_checkpoint(
@@ -432,10 +524,26 @@ def load_checkpoint(
 ) -> None:
     # `weights_only=True` rejects pickled tensors with unknown classes — safe for
     # our own training checkpoints which only contain torch state dicts and ints.
+    # Fall back to weights_only=False ONLY on the specific "unsupported global"
+    # error that older PyTorch / SAM2-style payloads raise; any other failure
+    # (truncation, IO error, ...) propagates so we don't silently `pickle.load`
+    # an untrusted file.
     try:
         sd = torch.load(path, map_location="cpu", weights_only=True)
-    except Exception:
-        # Older PyTorch / mixed payloads: fall back, but only for trusted local files.
+    except Exception as e:
+        msg = str(e).lower()
+        is_unsupported_global = (
+            "unsupported global" in msg
+            or "weights_only" in msg
+            or "globals" in msg
+        )
+        if not is_unsupported_global:
+            raise
+        print(
+            f"[load_checkpoint] weights_only=True rejected {path} "
+            f"({type(e).__name__}); retrying with weights_only=False. "
+            "Only do this for checkpoints you trust."
+        )
         sd = torch.load(path, map_location="cpu", weights_only=False)
 
     missing, unexpected = model.load_state_dict(sd["model"], strict=False)

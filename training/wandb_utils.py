@@ -19,6 +19,8 @@ from typing import Any, Optional
 
 
 def _load_dotenv() -> None:
+    """Load `.env` from repo root into `os.environ`. No-op if python-dotenv
+    isn't installed, or if no `.env` file is found."""
     try:
         from dotenv import load_dotenv  # type: ignore
     except ImportError:
@@ -29,6 +31,11 @@ def _load_dotenv() -> None:
         if candidate.is_file():
             load_dotenv(candidate, override=False)
             return
+
+
+# Public re-export so train scripts can ensure `.env` is loaded before
+# resolving any other env-derived defaults (data-root, init-from, ...).
+load_dotenv = _load_dotenv
 
 
 class WandbLogger:
@@ -81,6 +88,13 @@ class WandbLogger:
         if self._run is None:
             return
         self._run.log(metrics, step=step)
+
+    def summary(self, items: dict) -> None:
+        """Write final-result scalars to the wandb run summary."""
+        if self._run is None:
+            return
+        for k, v in items.items():
+            self._run.summary[k] = v
 
     def save(self, path: str) -> None:
         if self._run is None:

@@ -1,0 +1,40 @@
+# Stage 1 (image pretraining) — Minimal test config for VRAM reduction
+model:
+  config_file: configs/efficienttam/efficienttam_ti_512x512.yaml
+  overrides:
+    - "++model.sam_mask_decoder_extra_args=null"
+
+train:
+  epochs: 1
+  batch_size: 1
+  num_workers: 0  # 0 reduces memory overhead from multiprocessing
+  
+  backbone_lr: 6.0e-5
+  head_lr: 3.0e-4
+  layerwise_decay: 0.8
+  weight_decay: 0.1
+  warmup_pct: 0.05
+  grad_clip: 0.1
+
+  focal_w: 20.0
+  dice_w: 1.0
+  iou_w: 1.0
+  obj_w: 1.0
+
+  image_size: 512
+  prompt_mode: mixed
+  max_neg_points: 0
+  box_jitter_pct: 0.05
+  scale_range: [0.5, 1.0]
+  hflip_prob: 0.5
+  brightness: 0.1
+  contrast: 0.03
+  saturation: 0.03
+  grayscale_prob: 0.05
+  affine_degree: 25.0
+  affine_shear: 20.0
+
+  objects_per_image: 1  # Minimal objects
+
+  log_every: 1
+  seed: 0

@@ -54,7 +54,7 @@ training/
 │   ├── video_dataset.py            # SA-V / DAVIS / YouTube-VOS layout video dataset
 │   ├── augment.py                  # Image / clip augmentations (shared per-clip state)
 │   └── prompts.py                  # PromptSampler — point / box / correction-click sampling
-└── configs/                        # train_{image,video}_{s,ti}.yaml
+└── wandb_utils.py                  # Optional Weights & Biases logger (no-op without API key)
 ```
 
 ### `tools/` — batch inference + validation
@@ -70,22 +70,51 @@ tools/
 
 ## Model Variants
 
-Pick a variant when you start a training run by selecting the matching training config under `training/configs/`:
+Pick a variant when you start a training run by selecting the matching Hydra training config name:
 
-| Variant       | Resolution | Training configs                                   | Notes                      |
-| ------------- | ---------- | -------------------------------------------------- | -------------------------- |
-| `s`           | 1024×1024  | `train_image_s.yaml`, `train_video_s.yaml`         | Small model, best quality  |
-| `s_512x512`   | 512×512    | (use the `_s_512x512` model YAML in overrides)     | Small model, faster        |
-| `ti`          | 1024×1024  | `train_image_ti.yaml`, `train_video_ti.yaml`       | Tiny model, most efficient |
-| `ti_512x512`  | 512×512    | (use the `_ti_512x512` model YAML in overrides)    | Tiny model, fastest        |
+| Variant       | Resolution | Training configs                                                       | Notes                      |
+| ------------- | ---------- | ---------------------------------------------------------------------- | -------------------------- |
+| `s`           | 1024×1024  | `training/train_image_s`, `training/train_video_s`                     | Small model, best quality  |
+| `s_512x512`   | 512×512    | (use the `_s_512x512` model YAML in overrides)                         | Small model, faster        |
+| `ti`          | 1024×1024  | `training/train_image_ti`, `training/train_video_ti`                   | Tiny model, most efficient |
+| `ti_512x512`  | 512×512    | (use the `_ti_512x512` model YAML in overrides)                        | Tiny model, fastest        |
 
-Architecture YAMLs live in `efficient_track_anything/configs/efficienttam/`; training YAMLs (which reference an architecture YAML plus hyperparameters) live in `training/configs/`.
+All YAMLs live under `efficient_track_anything/configs/` (the package's Hydra config root): architecture YAMLs in `configs/efficienttam/`, training YAMLs (which reference an architecture YAML plus hyperparameters) in `configs/training/`. `--config` takes a Hydra config name relative to that root.
 
 ---
 
 ## Training
 
 EfficientTAM is trained in two stages, matching the paper recipe.
+
+### Configuration via `.env`
+
+Paths to datasets, output directories, and seed weights can be set in a `.env`
+file at the repo root so they don't have to be passed on the CLI every run.
+Copy [.env.example](.env.example) → `.env` and fill in what you need. CLI
+flags always override the env values.
+
+```dotenv
+# Weights & Biases — leave WANDB_API_KEY empty to disable logging entirely.
+WANDB_API_KEY=...
+WANDB_PROJECT=efficient-tam
+
+# Dataset roots (shared, or per-stage with _IMAGE / _VIDEO suffix)
+DATA_ROOT=/data
+DATA_ROOT_IMAGE=/data/sa1b
+DATA_ROOT_VIDEO=/data/davis17
+
+# Output directories for checkpoints
+OUTPUT_DIR_IMAGE=runs/image_s
+OUTPUT_DIR_VIDEO=runs/video_s
+
+# Stage-1 → Stage-2 weight handoff, and resume points
+INIT_FROM=runs/image_s/image_final.pt
+RESUME_VIDEO=runs/video_s/video_latest.pt
+```
+
+Resolution order for each path: `--cli-flag` → `${VAR}_IMAGE` / `${VAR}_VIDEO`
+(stage-specific) → `${VAR}` (shared) → error if still unset.
 
 ### Dataset layout
 
@@ -118,31 +147,68 @@ EfficientTAM is trained in two stages, matching the paper recipe.
 ### Stage 1: image pretraining
 
 ```bash
+# All paths can come from `.env`:
+python -m training.train_image --config training/train_image_s
+
+# Or pass them explicitly (overrides `.env`):
 python -m training.train_image \
-    --config training/configs/train_image_s.yaml \
+    --config training/train_image_s \
     --data-root /path/to/sa1b_style_root \
-    --output-dir runs/image_s
+    --output-dir runs/image_s \
+    train.batch_size=4 train.epochs=10   # optional Hydra-style overrides
 ```
 
 Key flags:
 
-- `--resume <ckpt>` — resume the same stage (loads optimizer + scheduler too)
-- `--overfit-one-batch` — single-batch smoke test; loss should drop near zero in a few hundred steps
-- All hyperparameters live in [training/configs/train_image_s.yaml](training/configs/train_image_s.yaml) (or `train_image_ti.yaml` for the tiny variant)
+- `--config` — Hydra config name under `efficient_track_anything/configs/` (e.g. `training/train_image_s`).
+- `--resume <ckpt>` — resume the same stage (loads optimizer + scheduler too). Defaults to `$RESUME_IMAGE` / `$RESUME`.
+- `--overfit-one-batch` — single-batch smoke test; loss should drop near zero in a few hundred steps.
+- Positional `key=value` args at the end are Hydra overrides for the training YAML (`train.batch_size=8`, `train.epochs=2`, …).
+- All hyperparameters live in [efficient_track_anything/configs/training/train_image_s.yaml](efficient_track_anything/configs/training/train_image_s.yaml) (or `train_image_ti.yaml` for the tiny variant).
 
 ### Stage 2: video fine-tuning
 
 ```bash
 python -m training.train_video \
-    --config training/configs/train_video_s.yaml \
+    --config training/train_video_s \
     --data-root /path/to/sav_or_davis_root \
     --output-dir runs/video_s \
     --init-from runs/image_s/image_final.pt
 ```
 
-`--init-from` seeds weights from the stage-1 checkpoint (memory_encoder / memory_attention keys load as random init since stage 1 doesn't train them).
+`--init-from` seeds weights from the stage-1 checkpoint (memory_encoder / memory_attention keys load as random init since stage 1 doesn't train them). It defaults to `$INIT_FROM_VIDEO` / `$INIT_FROM` from `.env`.
 
 Each video sample is an 8-frame clip with random stride; frame 0 gets a point or box prompt; a random subset of later frames receives a simulated correction click drawn from the model's own error region.
+
+### Checkpoints and crash safety
+
+Each epoch writes both `*_epoch_NNNN.pt` and a `*_latest.pt` pointer for easy resume. The writes are atomic (`tmp` + rename) so a kill / OOM mid-write cannot corrupt a checkpoint.
+
+On `KeyboardInterrupt` or any unhandled exception the trainer:
+
+1. prints the traceback to stderr,
+2. saves an emergency checkpoint to `*_interrupt.pt` and refreshes `*_latest.pt`,
+3. flushes the wandb run with `result/status = interrupted | crashed`,
+4. exits 1 only on crash (not on Ctrl-C).
+
+A non-finite loss (NaN / Inf) skips the optimizer step instead of poisoning every parameter, logs a warning to stdout, and records `train/nan_skip=1` to wandb.
+
+### Experiment tracking (Weights & Biases)
+
+Training auto-logs to W&B when `WANDB_API_KEY` is set in `.env` (or the process env). Without a key it prints one notice and runs normally — wandb is completely optional. What's logged:
+
+- **Config** — the full Hydra-composed YAML (`model.*`, `train.*`), CLI overrides, device, precision, and resolved path args.
+- **Process** — per step: `train/loss`, `train/lr`, `train/epoch`, plus each loss component (`train/focal`, `train/dice`, `train/iou_l1`, `train/obj_bce`). Per `log_every` steps: rolling `*_avg` values and throughput (`train/ips` for image, `train/clips_per_s` for video). Per epoch: `checkpoint/epoch` marker.
+- **Results** — written to the run summary: `result/status`, `result/final_checkpoint`, `result/steps`, `result/epochs`, and the last-epoch final loss + components.
+
+Add an optional `wandb:` block to a training YAML to customize:
+
+```yaml
+wandb:
+  project: efficient-tam
+  run_name: image_s_run01
+  tags: [stage1, paper]
+```
 
 ### Training recipe (matches paper / SAM2)
 
