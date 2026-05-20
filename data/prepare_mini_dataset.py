@@ -54,7 +54,9 @@ def _write_png_rgb(path: Path, pixels: list[list[Color]]) -> None:
         for r, g, b in row:
             raw.extend((r, g, b))
     payload = b"\x89PNG\r\n\x1a\n"
-    payload += _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+    payload += _png_chunk(
+        b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    )
     payload += _png_chunk(b"IDAT", zlib.compress(bytes(raw), level=6))
     payload += _png_chunk(b"IEND", b"")
     path.write_bytes(payload)
@@ -68,7 +70,9 @@ def _write_png_gray(path: Path, pixels: list[list[int]]) -> None:
         raw.append(0)
         raw.extend(max(0, min(255, v)) for v in row)
     payload = b"\x89PNG\r\n\x1a\n"
-    payload += _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0))
+    payload += _png_chunk(
+        b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)
+    )
     payload += _png_chunk(b"IDAT", zlib.compress(bytes(raw), level=6))
     payload += _png_chunk(b"IEND", b"")
     path.write_bytes(payload)
@@ -93,21 +97,27 @@ def _gray_canvas(size: int, value: int = 0) -> list[list[int]]:
     return [[value for _ in range(size)] for _ in range(size)]
 
 
-def _draw_rect_rgb(pixels: list[list[Color]], box: tuple[int, int, int, int], color: Color) -> None:
+def _draw_rect_rgb(
+    pixels: list[list[Color]], box: tuple[int, int, int, int], color: Color
+) -> None:
     x0, y0, x1, y1 = box
     for y in range(max(0, y0), min(len(pixels), y1 + 1)):
         for x in range(max(0, x0), min(len(pixels[0]), x1 + 1)):
             pixels[y][x] = color
 
 
-def _draw_rect_gray(pixels: list[list[int]], box: tuple[int, int, int, int], value: int) -> None:
+def _draw_rect_gray(
+    pixels: list[list[int]], box: tuple[int, int, int, int], value: int
+) -> None:
     x0, y0, x1, y1 = box
     for y in range(max(0, y0), min(len(pixels), y1 + 1)):
         for x in range(max(0, x0), min(len(pixels[0]), x1 + 1)):
             pixels[y][x] = value
 
 
-def _draw_ellipse_rgb(pixels: list[list[Color]], box: tuple[int, int, int, int], color: Color) -> None:
+def _draw_ellipse_rgb(
+    pixels: list[list[Color]], box: tuple[int, int, int, int], color: Color
+) -> None:
     x0, y0, x1, y1 = box
     cx = (x0 + x1) / 2.0
     cy = (y0 + y1) / 2.0
@@ -119,7 +129,9 @@ def _draw_ellipse_rgb(pixels: list[list[Color]], box: tuple[int, int, int, int],
                 pixels[y][x] = color
 
 
-def _draw_ellipse_gray(pixels: list[list[int]], box: tuple[int, int, int, int], value: int) -> None:
+def _draw_ellipse_gray(
+    pixels: list[list[int]], box: tuple[int, int, int, int], value: int
+) -> None:
     x0, y0, x1, y1 = box
     cx = (x0 + x1) / 2.0
     cy = (y0 + y1) / 2.0

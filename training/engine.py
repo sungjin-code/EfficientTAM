@@ -230,6 +230,37 @@ def _autocast(device: torch.device, precision: str = "auto"):
     return torch.autocast(device_type="cpu", enabled=False)
 
 
+def _scale_gradients(model: torch.nn.Module, scale: float) -> None:
+    if scale == 1.0:
+        return
+    for param in model.parameters():
+        if param.grad is not None:
+            param.grad.mul_(scale)
+
+
+def _optimizer_step(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: WarmupCosineSchedule,
+    state: TrainState,
+    grad_clip: float,
+    accumulation_steps: int,
+    pending_micro_batches: int,
+) -> None:
+    if pending_micro_batches <= 0:
+        return
+    # Backward divides by the target accumulation count. For a partial epoch
+    # tail, rescale so the step averages the microbatches that actually ran.
+    _scale_gradients(model, accumulation_steps / pending_micro_batches)
+    average_gradients(model)
+    if grad_clip > 0:
+        clip_grad_norm(model.parameters(), grad_clip)
+    optimizer.step()
+    scheduler.step()
+    optimizer.zero_grad(set_to_none=True)
+    state.step += 1
+
+
 def train_one_epoch_image(
     model: torch.nn.Module,
     loader: Iterable[dict],
@@ -240,6 +271,7 @@ def train_one_epoch_image(
     device: torch.device,
     state: TrainState,
     grad_clip: float = 0.1,
+    accumulation_steps: int = 1,
     log_every: int = 20,
     overfit_one_batch: bool = False,
     max_steps: int | None = None,
@@ -248,6 +280,7 @@ def train_one_epoch_image(
 ) -> dict:
     """One pass over the image loader. Each batch is a T=1 clip."""
     model.train()
+    accumulation_steps = max(1, int(accumulation_steps))
     fixed_batch = None
     running: dict[str, float] = {"loss": 0.0, "n": 0.0}
     component_keys = ("focal", "dice", "iou_l1", "obj_bce")
@@ -258,6 +291,8 @@ def train_one_epoch_image(
     last_components: dict[str, float] = {}
     consecutive_nan = 0
     MAX_CONSECUTIVE_NAN = 50
+    pending_micro_batches = 0
+    optimizer.zero_grad(set_to_none=True)
     for batch in loader:
         if max_steps is not None and state.step >= max_steps:
             break
@@ -305,6 +340,10 @@ def train_one_epoch_image(
                 f"({consecutive_nan}/{MAX_CONSECUTIVE_NAN} consecutive)"
             )
             optimizer.zero_grad(set_to_none=True)
+            pending_micro_batches = 0
+            running = {"loss": 0.0, "n": 0.0}
+            for k in component_keys:
+                running[k] = 0.0
             if logger is not None and logger.enabled:
                 logger.log({"train/nan_skip": 1.0}, step=state.step)
             if consecutive_nan >= MAX_CONSECUTIVE_NAN:
@@ -315,27 +354,39 @@ def train_one_epoch_image(
             continue
         consecutive_nan = 0
 
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        average_gradients(model)
-        if grad_clip > 0:
-            clip_grad_norm(model.parameters(), grad_clip)
-        optimizer.step()
-        scheduler.step()
-        state.step += 1
-
+        (loss / accumulation_steps).backward()
+        pending_micro_batches += 1
         running["loss"] += step_loss
         running["n"] += 1
         last_components = _aggregate_clip_metrics(out.per_frame_metrics)
         for k in component_keys:
             running[k] += last_components.get(k, 0.0)
+
+        if pending_micro_batches < accumulation_steps:
+            continue
+
+        _optimizer_step(
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            state=state,
+            grad_clip=grad_clip,
+            accumulation_steps=accumulation_steps,
+            pending_micro_batches=pending_micro_batches,
+        )
+        pending_micro_batches = 0
+
+        n = max(1, running["n"])
+        avg = running["loss"] / n
+        comp_avgs = {k: running[k] / n for k in component_keys}
         if logger is not None and logger.enabled:
             payload = {
-                "train/loss": step_loss,
+                "train/loss": avg,
                 "train/lr": optimizer.param_groups[0]["lr"],
                 "train/epoch": state.epoch,
+                "train/accumulation_steps": accumulation_steps,
             }
-            for k, v in last_components.items():
+            for k, v in comp_avgs.items():
                 payload[f"train/{k}"] = v
             logger.log(payload, step=state.step)
         if state.step % log_every == 0:
@@ -348,10 +399,11 @@ def train_one_epoch_image(
             comp_str = " ".join(f"{k}={v:.4f}" for k, v in comp_avgs.items())
             print(
                 f"[image] step={state.step} epoch={state.epoch} loss={avg:.4f} "
-                f"{comp_str} lr={lr:.2e} ips={ips:.2f}"
+                f"{comp_str} lr={lr:.2e} accum={accumulation_steps} "
+                f"micro_batches/s={ips:.2f}"
             )
             if logger is not None and logger.enabled:
-                payload = {"train/loss_avg": avg, "train/ips": ips}
+                payload = {"train/loss_avg": avg, "train/micro_batches_per_s": ips}
                 for k, v in comp_avgs.items():
                     payload[f"train/{k}_avg"] = v
                 logger.log(payload, step=state.step)
@@ -359,6 +411,16 @@ def train_one_epoch_image(
             for k in component_keys:
                 running[k] = 0.0
             t_start = time.time()
+    if pending_micro_batches > 0 and (max_steps is None or state.step < max_steps):
+        _optimizer_step(
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            state=state,
+            grad_clip=grad_clip,
+            accumulation_steps=accumulation_steps,
+            pending_micro_batches=pending_micro_batches,
+        )
     final = {"final_loss": float(loss.detach().item())}
     for k, v in last_components.items():
         final[f"final_{k}"] = v
@@ -375,6 +437,7 @@ def train_one_epoch_video(
     device: torch.device,
     state: TrainState,
     grad_clip: float = 0.1,
+    accumulation_steps: int = 1,
     log_every: int = 5,
     overfit_one_batch: bool = False,
     max_steps: int | None = None,
@@ -382,6 +445,7 @@ def train_one_epoch_video(
     logger: Optional[WandbLogger] = None,
 ) -> dict:
     model.train()
+    accumulation_steps = max(1, int(accumulation_steps))
     fixed_batch = None
     running: dict[str, float] = {"loss": 0.0, "n": 0.0}
     component_keys = ("focal", "dice", "iou_l1", "obj_bce")
@@ -392,6 +456,8 @@ def train_one_epoch_video(
     last_components: dict[str, float] = {}
     consecutive_nan = 0
     MAX_CONSECUTIVE_NAN = 50
+    pending_micro_batches = 0
+    optimizer.zero_grad(set_to_none=True)
     for batch in loader:
         if max_steps is not None and state.step >= max_steps:
             break
@@ -437,6 +503,10 @@ def train_one_epoch_video(
                 f"({consecutive_nan}/{MAX_CONSECUTIVE_NAN} consecutive)"
             )
             optimizer.zero_grad(set_to_none=True)
+            pending_micro_batches = 0
+            running = {"loss": 0.0, "n": 0.0}
+            for k in component_keys:
+                running[k] = 0.0
             if logger is not None and logger.enabled:
                 logger.log({"train/nan_skip": 1.0}, step=state.step)
             if consecutive_nan >= MAX_CONSECUTIVE_NAN:
@@ -447,27 +517,39 @@ def train_one_epoch_video(
             continue
         consecutive_nan = 0
 
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        average_gradients(model)
-        if grad_clip > 0:
-            clip_grad_norm(model.parameters(), grad_clip)
-        optimizer.step()
-        scheduler.step()
-        state.step += 1
-
+        (loss / accumulation_steps).backward()
+        pending_micro_batches += 1
         running["loss"] += step_loss
         running["n"] += 1
         last_components = _aggregate_clip_metrics(out.per_frame_metrics)
         for k in component_keys:
             running[k] += last_components.get(k, 0.0)
+
+        if pending_micro_batches < accumulation_steps:
+            continue
+
+        _optimizer_step(
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            state=state,
+            grad_clip=grad_clip,
+            accumulation_steps=accumulation_steps,
+            pending_micro_batches=pending_micro_batches,
+        )
+        pending_micro_batches = 0
+
+        n = max(1, running["n"])
+        avg = running["loss"] / n
+        comp_avgs = {k: running[k] / n for k in component_keys}
         if logger is not None and logger.enabled:
             payload = {
-                "train/loss": step_loss,
+                "train/loss": avg,
                 "train/lr": optimizer.param_groups[0]["lr"],
                 "train/epoch": state.epoch,
+                "train/accumulation_steps": accumulation_steps,
             }
-            for k, v in last_components.items():
+            for k, v in comp_avgs.items():
                 payload[f"train/{k}"] = v
             logger.log(payload, step=state.step)
         if state.step % log_every == 0:
@@ -480,10 +562,11 @@ def train_one_epoch_video(
             comp_str = " ".join(f"{k}={v:.4f}" for k, v in comp_avgs.items())
             print(
                 f"[video] step={state.step} epoch={state.epoch} loss={avg:.4f} "
-                f"{comp_str} lr={lr:.2e} clips/s={cps:.2f}"
+                f"{comp_str} lr={lr:.2e} accum={accumulation_steps} "
+                f"micro_batches/s={cps:.2f}"
             )
             if logger is not None and logger.enabled:
-                payload = {"train/loss_avg": avg, "train/clips_per_s": cps}
+                payload = {"train/loss_avg": avg, "train/micro_batches_per_s": cps}
                 for k, v in comp_avgs.items():
                     payload[f"train/{k}_avg"] = v
                 logger.log(payload, step=state.step)
@@ -491,6 +574,16 @@ def train_one_epoch_video(
             for k in component_keys:
                 running[k] = 0.0
             t_start = time.time()
+    if pending_micro_batches > 0 and (max_steps is None or state.step < max_steps):
+        _optimizer_step(
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            state=state,
+            grad_clip=grad_clip,
+            accumulation_steps=accumulation_steps,
+            pending_micro_batches=pending_micro_batches,
+        )
     final = {"final_loss": float(loss.detach().item())}
     for k, v in last_components.items():
         final[f"final_{k}"] = v
@@ -538,9 +631,7 @@ def load_checkpoint(
     except Exception as e:
         msg = str(e).lower()
         is_unsupported_global = (
-            "unsupported global" in msg
-            or "weights_only" in msg
-            or "globals" in msg
+            "unsupported global" in msg or "weights_only" in msg or "globals" in msg
         )
         if not is_unsupported_global:
             raise

@@ -6,11 +6,14 @@ model:
   config_file: configs/efficienttam/efficienttam_s.yaml
   overrides:
     - "++model.sam_mask_decoder_extra_args=null"
+    # Used when Stage 2 is launched without --init-from; --init-from still overrides it.
+    - "++model.image_encoder.weights_path=efficient_sam_vits"
 
 train:
   epochs: 1000000
   max_steps: 300000
   batch_size: 2                 # per GPU; paper global batch is 256
+  accumulation_steps: 1
   num_workers: 2
 
   # Paper LRs (same as image stage)
@@ -37,6 +40,8 @@ train:
   max_neg_points: 0
   box_jitter_pct: 0.05
   scale_range: [0.7, 1.0]
+  image_mix_prob: 0.1
+  image_scale_range: [0.5, 1.0]
   hflip_prob: 0.5
   brightness: 0.1
   contrast: 0.03

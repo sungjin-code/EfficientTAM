@@ -38,6 +38,7 @@ BOX_PROMPT_MODE = "box prompt"
 MASK_GENERATION_MODE = "mask generation"
 MODE_NAMES = [BOX_PROMPT_MODE, MASK_GENERATION_MODE]
 
+
 def get_examples(checkpoint):
     return [
         [checkpoint, MASK_GENERATION_MODE, "examples/mario_1.jpg", None],
@@ -46,6 +47,7 @@ def get_examples(checkpoint):
         [checkpoint, MASK_GENERATION_MODE, "examples/mario_2.jpg", None],
         [checkpoint, MASK_GENERATION_MODE, "examples/bill.jpg", None],
     ]
+
 
 DEVICE = "cuda"
 
@@ -65,9 +67,14 @@ CHECKPOINTS = {
         "./checkpoints/efficienttam_ti.pt",
     ],
 }
-AVAILABLE_CHECKPOINTS = [name for name in CHECKPOINT_NAMES if os.path.exists(CHECKPOINTS[name][1])]
+AVAILABLE_CHECKPOINTS = [
+    name for name in CHECKPOINT_NAMES if os.path.exists(CHECKPOINTS[name][1])
+]
 if not AVAILABLE_CHECKPOINTS:
-    raise FileNotFoundError("No checkpoint files found in ./checkpoints directory. Please download at least one.")
+    raise FileNotFoundError(
+        "No checkpoint files found in ./checkpoints directory. Please download at least one."
+    )
+
 
 def load_models(
     device: torch.device,
@@ -173,7 +180,11 @@ with gr.Blocks() as demo:
             image_output_component = gr.Image(type="pil", label="Image Output")
     with gr.Row():
         gr.Examples(
-            examples=get_examples(AVAILABLE_CHECKPOINTS[0] if AVAILABLE_CHECKPOINTS else CHECKPOINT_NAMES[0]),
+            examples=get_examples(
+                AVAILABLE_CHECKPOINTS[0]
+                if AVAILABLE_CHECKPOINTS
+                else CHECKPOINT_NAMES[0]
+            ),
             inputs=[
                 checkpoint_dropdown_component,
                 mode_dropdown_component,

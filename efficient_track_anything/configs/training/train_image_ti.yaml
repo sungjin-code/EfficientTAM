@@ -5,11 +5,14 @@ model:
   config_file: configs/efficienttam/efficienttam_ti.yaml
   overrides:
     - "++model.sam_mask_decoder_extra_args=null"
+    # Paper initialization: SAMI-pretrained EfficientSAM ViT-Ti image encoder.
+    - "++model.image_encoder.weights_path=efficient_sam_vitt"
 
 train:
   epochs: 1000000
   max_steps: 90000
   batch_size: 16              # per GPU; paper global batch is 256
+  accumulation_steps: 1
   num_workers: 4
   backbone_lr: 4.0e-4
   head_lr: 4.0e-4

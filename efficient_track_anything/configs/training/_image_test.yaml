@@ -9,6 +9,7 @@ model:
 train:
   epochs: 1
   batch_size: 1
+  accumulation_steps: 1
   num_workers: 0  # 0 reduces memory overhead from multiprocessing
   
   backbone_lr: 6.0e-5

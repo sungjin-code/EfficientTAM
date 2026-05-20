@@ -29,7 +29,12 @@ import efficient_track_anything  # noqa: F401  (initializes Hydra config module)
 from efficient_track_anything.build_efficienttam import build_efficienttam
 from training.distributed import broadcast_model, cleanup_distributed, init_distributed
 from training.data.prompts import PromptSampler
-from training.data.video_dataset import VideoSegmentationDataset, collate_video_batch
+from training.data.image_dataset import ImageSegmentationDataset
+from training.data.video_dataset import (
+    MixedVideoImageDataset,
+    VideoSegmentationDataset,
+    collate_video_batch,
+)
 from training.engine import (
     TrainState,
     load_checkpoint,
@@ -62,6 +67,11 @@ def parse_args() -> argparse.Namespace:
         "--data-root",
         default=os.environ.get("DATA_ROOT_VIDEO") or os.environ.get("DATA_ROOT"),
         help="Video dataset root. Defaults to $DATA_ROOT_VIDEO / $DATA_ROOT from `.env`.",
+    )
+    p.add_argument(
+        "--image-data-root",
+        default=os.environ.get("DATA_ROOT_IMAGE"),
+        help="SA-1B-style image dataset root for Stage-2 10% image mixing.",
     )
     p.add_argument(
         "--output-dir",
@@ -100,8 +110,16 @@ def _load_cfg(config_name: str, overrides: list[str]) -> dict:
     name = config_name
     if name.endswith(".yaml"):
         name = name[: -len(".yaml")]
+    if name.startswith("training/configs/"):
+        name = "configs/training/" + name[len("training/configs/") :]
+    elif name.startswith("training/"):
+        name = "configs/" + name
     cfg = compose(config_name=name, overrides=overrides)
     return OmegaConf.to_container(cfg, resolve=True)
+
+
+def _drop_default_image_encoder_pretrain(overrides: list[str]) -> list[str]:
+    return [o for o in overrides if "model.image_encoder.weights_path" not in o]
 
 
 def main() -> None:
@@ -109,7 +127,10 @@ def main() -> None:
     args = parse_args()
     missing = [
         name
-        for name, val in (("--data-root", args.data_root), ("--output-dir", args.output_dir))
+        for name, val in (
+            ("--data-root", args.data_root),
+            ("--output-dir", args.output_dir),
+        )
         if not val
     ]
     if missing:
@@ -136,6 +157,8 @@ def main() -> None:
         torch.cuda.manual_seed_all(train_cfg.get("seed", 0))
 
     overrides = list(model_cfg.get("overrides", []))
+    if args.init_from is not None or args.resume is not None:
+        overrides = _drop_default_image_encoder_pretrain(overrides)
     overrides.append("++model.compile_image_encoder=false")
 
     model = build_efficienttam(
@@ -176,6 +199,33 @@ def main() -> None:
         objects_per_clip=train_cfg.get("objects_per_clip", 1),
         seed=train_cfg.get("seed", 0),
     )
+    image_mix_prob = float(train_cfg.get("image_mix_prob", 0.0))
+    if image_mix_prob > 0:
+        if not args.image_data_root:
+            raise SystemExit(
+                "[train_video] train.image_mix_prob > 0 requires "
+                "--image-data-root or DATA_ROOT_IMAGE."
+            )
+        image_dataset = ImageSegmentationDataset(
+            root=args.image_data_root,
+            image_size=train_cfg["image_size"],
+            prompt_sampler=prompt_sampler,
+            scale_range=tuple(train_cfg.get("image_scale_range", [0.5, 1.0])),
+            hflip_prob=train_cfg.get("hflip_prob", 0.5),
+            brightness=train_cfg.get("brightness", 0.1),
+            contrast=train_cfg.get("contrast", 0.03),
+            saturation=train_cfg.get("saturation", 0.03),
+            grayscale_prob=train_cfg.get("grayscale_prob", 0.05),
+            affine_degree=train_cfg.get("affine_degree", 25.0),
+            affine_shear=train_cfg.get("affine_shear", 20.0),
+            objects_per_image=train_cfg.get("objects_per_clip", 1),
+        )
+        dataset = MixedVideoImageDataset(
+            video_dataset=dataset,
+            image_dataset=image_dataset,
+            image_mix_prob=image_mix_prob,
+            seed=train_cfg.get("seed", 0),
+        )
     sampler = (
         DistributedSampler(dataset, shuffle=True, drop_last=True)
         if dist_info.enabled
@@ -192,8 +242,16 @@ def main() -> None:
         pin_memory=(device.type == "cuda"),
     )
 
+    accumulation_steps = max(1, int(train_cfg.get("accumulation_steps", 1)))
     steps_per_epoch = max(1, len(loader))
-    total_steps = effective_max_steps or (train_cfg["epochs"] * steps_per_epoch)
+    optimizer_steps_per_epoch = max(
+        1, (steps_per_epoch + accumulation_steps - 1) // accumulation_steps
+    )
+    total_steps = effective_max_steps or (
+        train_cfg["epochs"] * optimizer_steps_per_epoch
+    )
+    micro_global_batch_size = train_cfg["batch_size"] * dist_info.world_size
+    effective_global_batch_size = micro_global_batch_size * accumulation_steps
 
     optimizer = build_optimizer(
         model,
@@ -238,7 +296,9 @@ def main() -> None:
                 "distributed": dist_info.enabled,
                 "world_size": dist_info.world_size,
                 "per_gpu_batch_size": train_cfg["batch_size"],
-                "global_batch_size": train_cfg["batch_size"] * dist_info.world_size,
+                "micro_global_batch_size": micro_global_batch_size,
+                "accumulation_steps": accumulation_steps,
+                "global_batch_size": effective_global_batch_size,
                 "model": model_cfg,
                 "train": train_cfg,
             },
@@ -265,6 +325,7 @@ def main() -> None:
                 device=device,
                 state=state,
                 grad_clip=train_cfg.get("grad_clip", 0.1),
+                accumulation_steps=accumulation_steps,
                 log_every=train_cfg.get("log_every", 5),
                 overfit_one_batch=args.overfit_one_batch,
                 max_steps=effective_max_steps,
@@ -282,7 +343,10 @@ def main() -> None:
         print("[train_video] KeyboardInterrupt — saving emergency checkpoint")
     except Exception:
         exit_status = "crashed"
-        print("[train_video] FATAL exception — saving emergency checkpoint", file=sys.stderr)
+        print(
+            "[train_video] FATAL exception — saving emergency checkpoint",
+            file=sys.stderr,
+        )
         traceback.print_exc()
     finally:
         if exit_status != "ok":
@@ -290,7 +354,9 @@ def main() -> None:
                 try:
                     emergency = out_dir / "video_interrupt.pt"
                     save_checkpoint(model, optimizer, scheduler, str(emergency), state)
-                    save_checkpoint(model, optimizer, scheduler, str(latest_path), state)
+                    save_checkpoint(
+                        model, optimizer, scheduler, str(latest_path), state
+                    )
                     print(f"[train_video] emergency checkpoint saved at {emergency}")
                 except Exception:
                     print("[train_video] emergency save FAILED", file=sys.stderr)

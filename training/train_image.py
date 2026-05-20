@@ -111,8 +111,16 @@ def _load_cfg(config_name: str, overrides: list[str]) -> dict:
     name = config_name
     if name.endswith(".yaml"):
         name = name[: -len(".yaml")]
+    if name.startswith("training/configs/"):
+        name = "configs/training/" + name[len("training/configs/") :]
+    elif name.startswith("training/"):
+        name = "configs/" + name
     cfg = compose(config_name=name, overrides=overrides)
     return OmegaConf.to_container(cfg, resolve=True)
+
+
+def _drop_default_image_encoder_pretrain(overrides: list[str]) -> list[str]:
+    return [o for o in overrides if "model.image_encoder.weights_path" not in o]
 
 
 def main() -> None:
@@ -120,7 +128,10 @@ def main() -> None:
     args = parse_args()
     missing = [
         name
-        for name, val in (("--data-root", args.data_root), ("--output-dir", args.output_dir))
+        for name, val in (
+            ("--data-root", args.data_root),
+            ("--output-dir", args.output_dir),
+        )
         if not val
     ]
     if missing:
@@ -147,6 +158,8 @@ def main() -> None:
         torch.cuda.manual_seed_all(train_cfg.get("seed", 0))
 
     overrides = list(model_cfg.get("overrides", []))
+    if args.init_from is not None or args.resume is not None:
+        overrides = _drop_default_image_encoder_pretrain(overrides)
     # Training never wants compile (graph recompilation on shape changes).
     overrides.append("++model.compile_image_encoder=false")
 
@@ -199,8 +212,16 @@ def main() -> None:
         pin_memory=(device.type == "cuda"),
     )
 
+    accumulation_steps = max(1, int(train_cfg.get("accumulation_steps", 1)))
     steps_per_epoch = max(1, len(loader))
-    total_steps = effective_max_steps or (train_cfg["epochs"] * steps_per_epoch)
+    optimizer_steps_per_epoch = max(
+        1, (steps_per_epoch + accumulation_steps - 1) // accumulation_steps
+    )
+    total_steps = effective_max_steps or (
+        train_cfg["epochs"] * optimizer_steps_per_epoch
+    )
+    micro_global_batch_size = train_cfg["batch_size"] * dist_info.world_size
+    effective_global_batch_size = micro_global_batch_size * accumulation_steps
 
     optimizer = build_optimizer(
         model,
@@ -244,7 +265,9 @@ def main() -> None:
                 "distributed": dist_info.enabled,
                 "world_size": dist_info.world_size,
                 "per_gpu_batch_size": train_cfg["batch_size"],
-                "global_batch_size": train_cfg["batch_size"] * dist_info.world_size,
+                "micro_global_batch_size": micro_global_batch_size,
+                "accumulation_steps": accumulation_steps,
+                "global_batch_size": effective_global_batch_size,
                 "model": model_cfg,
                 "train": train_cfg,
             },
@@ -271,6 +294,7 @@ def main() -> None:
                 device=device,
                 state=state,
                 grad_clip=train_cfg.get("grad_clip", 0.1),
+                accumulation_steps=accumulation_steps,
                 log_every=train_cfg.get("log_every", 20),
                 overfit_one_batch=args.overfit_one_batch,
                 max_steps=effective_max_steps,
@@ -288,7 +312,10 @@ def main() -> None:
         print("[train_image] KeyboardInterrupt — saving emergency checkpoint")
     except Exception:
         exit_status = "crashed"
-        print("[train_image] FATAL exception — saving emergency checkpoint", file=sys.stderr)
+        print(
+            "[train_image] FATAL exception — saving emergency checkpoint",
+            file=sys.stderr,
+        )
         traceback.print_exc()
     finally:
         if exit_status != "ok":
@@ -296,7 +323,9 @@ def main() -> None:
                 try:
                     emergency = out_dir / "image_interrupt.pt"
                     save_checkpoint(model, optimizer, scheduler, str(emergency), state)
-                    save_checkpoint(model, optimizer, scheduler, str(latest_path), state)
+                    save_checkpoint(
+                        model, optimizer, scheduler, str(latest_path), state
+                    )
                     print(f"[train_image] emergency checkpoint saved at {emergency}")
                 except Exception:
                     print("[train_image] emergency save FAILED", file=sys.stderr)

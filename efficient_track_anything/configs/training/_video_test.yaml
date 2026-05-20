@@ -9,6 +9,7 @@ model:
 train:
   epochs: 1
   batch_size: 1
+  accumulation_steps: 1
   num_workers: 0  # 0 reduces memory overhead
   
   backbone_lr: 6.0e-5
@@ -33,6 +34,8 @@ train:
   max_neg_points: 0
   box_jitter_pct: 0.05
   scale_range: [0.7, 1.0]
+  image_mix_prob: 0.5
+  image_scale_range: [0.5, 1.0]
   hflip_prob: 0.5
   brightness: 0.1
   contrast: 0.03

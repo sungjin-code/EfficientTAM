@@ -273,19 +273,47 @@ def show_box(box, ax):
 
 
 CHECKPOINTS_MAP = {
-    "efficienttam_s": ("configs/efficienttam/efficienttam_s.yaml", "./checkpoints/efficienttam_s.pt"),
-    "efficienttam_ti": ("configs/efficienttam/efficienttam_ti.yaml", "./checkpoints/efficienttam_ti.pt"),
-    "efficienttam_s_512x512": ("configs/efficienttam/efficienttam_s_512x512.yaml", "./checkpoints/efficienttam_s_512x512.pt"),
-    "efficienttam_ti_512x512": ("configs/efficienttam/efficienttam_ti_512x512.yaml", "./checkpoints/efficienttam_ti_512x512.pt"),
-    "efficienttam_s_1": ("configs/efficienttam/efficienttam_s_1.yaml", "./checkpoints/efficienttam_s_1.pt"),
-    "efficienttam_s_2": ("configs/efficienttam/efficienttam_s_2.yaml", "./checkpoints/efficienttam_s_2.pt"),
-    "efficienttam_ti_1": ("configs/efficienttam/efficienttam_ti_1.yaml", "./checkpoints/efficienttam_ti_1.pt"),
-    "efficienttam_ti_2": ("configs/efficienttam/efficienttam_ti_2.yaml", "./checkpoints/efficienttam_ti_2.pt"),
+    "efficienttam_s": (
+        "configs/efficienttam/efficienttam_s.yaml",
+        "./checkpoints/efficienttam_s.pt",
+    ),
+    "efficienttam_ti": (
+        "configs/efficienttam/efficienttam_ti.yaml",
+        "./checkpoints/efficienttam_ti.pt",
+    ),
+    "efficienttam_s_512x512": (
+        "configs/efficienttam/efficienttam_s_512x512.yaml",
+        "./checkpoints/efficienttam_s_512x512.pt",
+    ),
+    "efficienttam_ti_512x512": (
+        "configs/efficienttam/efficienttam_ti_512x512.yaml",
+        "./checkpoints/efficienttam_ti_512x512.pt",
+    ),
+    "efficienttam_s_1": (
+        "configs/efficienttam/efficienttam_s_1.yaml",
+        "./checkpoints/efficienttam_s_1.pt",
+    ),
+    "efficienttam_s_2": (
+        "configs/efficienttam/efficienttam_s_2.yaml",
+        "./checkpoints/efficienttam_s_2.pt",
+    ),
+    "efficienttam_ti_1": (
+        "configs/efficienttam/efficienttam_ti_1.yaml",
+        "./checkpoints/efficienttam_ti_1.pt",
+    ),
+    "efficienttam_ti_2": (
+        "configs/efficienttam/efficienttam_ti_2.yaml",
+        "./checkpoints/efficienttam_ti_2.pt",
+    ),
 }
 
-AVAILABLE_CHECKPOINTS = [name for name, (cfg, ckpt) in CHECKPOINTS_MAP.items() if os.path.exists(ckpt)]
+AVAILABLE_CHECKPOINTS = [
+    name for name, (cfg, ckpt) in CHECKPOINTS_MAP.items() if os.path.exists(ckpt)
+]
 if not AVAILABLE_CHECKPOINTS:
-    raise FileNotFoundError("No checkpoint files found in ./checkpoints directory. Please download at least one.")
+    raise FileNotFoundError(
+        "No checkpoint files found in ./checkpoints directory. Please download at least one."
+    )
 
 
 def load_model(checkpoint):
@@ -615,7 +643,9 @@ with gr.Blocks() as demo:
                     checkpoint = gr.Dropdown(
                         label="Checkpoint",
                         choices=AVAILABLE_CHECKPOINTS,
-                        value=AVAILABLE_CHECKPOINTS[0] if AVAILABLE_CHECKPOINTS else None,
+                        value=AVAILABLE_CHECKPOINTS[0]
+                        if AVAILABLE_CHECKPOINTS
+                        else None,
                     )
                     submit_btn = gr.Button("Segment", size="lg")
 

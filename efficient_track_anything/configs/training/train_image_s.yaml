@@ -10,12 +10,15 @@ model:
   overrides:
     # `apply_postprocessing=False` already null's this; explicit here for safety.
     - "++model.sam_mask_decoder_extra_args=null"
+    # Paper initialization: SAMI-pretrained EfficientSAM ViT-S image encoder.
+    - "++model.image_encoder.weights_path=efficient_sam_vits"
 
 train:
   # Optimization (paper-aligned)
   epochs: 1000000             # max_steps is the real budget
   max_steps: 90000
   batch_size: 8               # per GPU; paper global batch is 256
+  accumulation_steps: 1
   num_workers: 4
   backbone_lr: 4.0e-4
   head_lr: 4.0e-4

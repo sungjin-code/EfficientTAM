@@ -1,6 +1,6 @@
 # Efficient Track Anything (EfficientTAM)
 
-> [Efficient Track Anything](https://arxiv.org/pdf/2411.18933), ICCV 2025.
+> [Efficient Track Anything](https://openaccess.thecvf.com/content/ICCV2025/papers/Xiong_Efficient_Track_Anything_ICCV_2025_paper.pdf), ICCV 2025.
 
 This repository contains the official EfficientTAM model/inference code plus a
 local training, validation, and headless inference pipeline.
@@ -149,11 +149,15 @@ For example, `training/train_image_ti` points at
 The local configs follow the EfficientTAM paper as closely as this pipeline
 supports:
 
+- Image encoder initialization: `training/train_image_{ti,s}` starts from the
+  SAMI-pretrained EfficientSAM ViT-Ti / ViT-S image encoder by default. The
+  weights are downloaded through PyTorch's model cache on first use.
 - Stage 1 image pretraining: SA-1B-style images, 90k optimizer steps, LR `4e-4`,
   inverse-square-root decay, 1k warmup, 5k cooldown, bf16 on CUDA, focal:dice
   loss `20:1`.
 - Stage 2 video fine-tuning: 300k optimizer steps, encoder LR `6e-5`, other
-  module LR `3e-4`, cosine schedule, 15k warmup, loss `20:1:1:1`.
+  module LR `3e-4`, cosine schedule, 15k warmup, loss `20:1:1:1`, with a 10%
+  SA-1B image mix by default.
 - Optimizer: AdamW, betas `(0.9, 0.999)`, weight decay `0.1`, layer-wise decay
   `0.8`, gradient clipping `0.1`.
 
@@ -162,8 +166,8 @@ Important practical differences:
 - The paper uses global batch 256 on 256 A100-80G GPUs. On 2 GPUs, reduce
   `train.batch_size`, `train.objects_per_image`, or `train.objects_per_clip` if
   you hit OOM.
-- The paper mixes SA-V with a 10% SA-1B subset during full training. The current
-  Stage 2 loader trains on the video-layout dataset only.
+- On small GPU counts, `train.sh` uses gradient accumulation to keep the
+  effective global batch at 256.
 
 ## Train
 
@@ -230,16 +234,20 @@ Useful flags:
 - `--max-steps N`: override the config step budget.
 - `--precision auto|bf16|fp16|fp32`: mixed precision mode.
 
-### Quick Smoke Pipeline
+### Paper Training Pipeline
 
-`train.sh` runs the tiny 512 smoke configs on GPU 0 and 1, then validates:
+`train.sh` runs the paper-aligned 1024px two-stage training pipeline on GPU 0 and
+1, using gradient accumulation so the effective global batch is 256. After
+training, it runs the configured VOS benchmark roots and optional SA-23 mIoU:
 
 ```bash
 NPROC_PER_NODE=2 CUDA_VISIBLE_DEVICES=0,1 ./train.sh
 ```
 
-Set `DATA_ROOT_IMAGE`, `DATA_ROOT_VIDEO` and `OUTPUT_DIR_VIDEO` in `.env` before using the
-script. The script will automatically verify that the configured data directories and their required subdirectories (`images`/`masks` and `JPEGImages`/`Annotations`) exist before starting the pipeline.
+Set `DATA_ROOT_IMAGE`, `DATA_ROOT_VIDEO`, at least one `VAL_ROOT_*` VOS root, and
+optionally `SA23_ROOT` / `OUTPUT_DIR` in `.env` before using the script. Use
+`VARIANT=s ./train.sh` for EfficientTAM-S; the default is `VARIANT=ti`. The
+script verifies the training dataset layout before starting.
 
 ## Checkpoints
 

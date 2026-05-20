@@ -4,6 +4,7 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+from pathlib import Path
 from typing import List, Optional
 
 import torch
@@ -13,12 +14,72 @@ import torch.nn.functional as F
 from efficient_track_anything.modeling.efficienttam_utils import LayerNorm2d
 
 
+EFFICIENTSAM_PRETRAINED_URLS = {
+    "efficient_sam_vitt": (
+        "https://huggingface.co/yunyangx/EfficientSAM/resolve/main/"
+        "efficient_sam_vitt.pt"
+    ),
+    "efficient_sam_vits": (
+        "https://huggingface.co/yunyangx/EfficientSAM/resolve/main/"
+        "efficient_sam_vits.pt"
+    ),
+}
+
+
+def _load_pretrained_state(weights_path: str) -> dict:
+    if weights_path in EFFICIENTSAM_PRETRAINED_URLS:
+        weights_path = EFFICIENTSAM_PRETRAINED_URLS[weights_path]
+
+    if weights_path.startswith(("http://", "https://")):
+        payload = torch.hub.load_state_dict_from_url(
+            weights_path, map_location="cpu", progress=True
+        )
+    else:
+        path = Path(weights_path).expanduser()
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+
+    if isinstance(payload, dict) and "model" in payload:
+        return payload["model"]
+    if isinstance(payload, dict) and "state_dict" in payload:
+        return payload["state_dict"]
+    return payload
+
+
+def _map_efficientsam_image_encoder_key(key: str) -> str | None:
+    if key.startswith("module."):
+        key = key[len("module.") :]
+    if not key.startswith("image_encoder."):
+        return None
+
+    key = key[len("image_encoder.") :]
+    if (
+        key.startswith("patch_embed.")
+        or key == "pos_embed"
+        or key.startswith("blocks.")
+    ):
+        key = key.replace(".mlp.fc1.", ".mlp.layers.0.")
+        key = key.replace(".mlp.fc2.", ".mlp.layers.1.")
+        return f"trunk.{key}"
+
+    neck_map = {
+        "neck.0.": "neck.convs.0.conv_1x1.",
+        "neck.1.": "neck.convs.0.norm_0.",
+        "neck.2.": "neck.convs.0.conv_3x3.",
+        "neck.3.": "neck.convs.0.norm_1.",
+    }
+    for src, dst in neck_map.items():
+        if key.startswith(src):
+            return f"{dst}{key[len(src) :]}"
+    return None
+
+
 class ImageEncoder(nn.Module):
     def __init__(
         self,
         trunk: nn.Module,
         neck: nn.Module,
         scalp: int = 0,
+        weights_path: Optional[str] = None,
     ):
         super().__init__()
         self.trunk = trunk
@@ -27,6 +88,49 @@ class ImageEncoder(nn.Module):
         assert self.trunk.channel_list == self.neck.backbone_channel_list, (
             f"Channel dims of trunk and neck do not match. Trunk: {self.trunk.channel_list}, neck: {self.neck.backbone_channel_list}"
         )
+        if weights_path is not None:
+            self._load_efficientsam_image_encoder_weights(weights_path)
+
+    def _load_efficientsam_image_encoder_weights(self, weights_path: str) -> None:
+        source_state = _load_pretrained_state(weights_path)
+        target_state = self.state_dict()
+        mapped_state = {}
+        skipped_shape = []
+
+        for key, value in source_state.items():
+            mapped_key = _map_efficientsam_image_encoder_key(key)
+            if mapped_key is None or mapped_key not in target_state:
+                continue
+            if value.shape != target_state[mapped_key].shape:
+                skipped_shape.append(
+                    (
+                        mapped_key,
+                        tuple(value.shape),
+                        tuple(target_state[mapped_key].shape),
+                    )
+                )
+                continue
+            mapped_state[mapped_key] = value
+
+        if not mapped_state:
+            raise RuntimeError(
+                f"No compatible EfficientSAM image-encoder weights found in {weights_path}"
+            )
+
+        self.load_state_dict(mapped_state, strict=False)
+        print(
+            f"[ImageEncoder] loaded {len(mapped_state)}/{len(target_state)} "
+            f"image-encoder params from {weights_path}"
+        )
+        if skipped_shape:
+            preview = ", ".join(
+                f"{name}: {src}->{dst}" for name, src, dst in skipped_shape[:3]
+            )
+            suffix = "..." if len(skipped_shape) > 3 else ""
+            print(
+                f"[ImageEncoder] skipped {len(skipped_shape)} shape-mismatched "
+                f"params ({preview}{suffix})"
+            )
 
     def forward(self, sample: torch.Tensor):
         # Forward through backbone

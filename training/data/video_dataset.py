@@ -34,6 +34,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from training.data.augment import apply_image, normalize, sample_params
+from training.data.image_dataset import ImageSegmentationDataset
 from training.data.prompts import PromptSample, PromptSampler
 
 
@@ -220,6 +221,46 @@ class VideoSegmentationDataset(Dataset):
             "correction_frames": correction_frames,
             "video_id": video,
         }
+
+
+def _image_sample_to_video_sample(sample: dict, clip_len: int) -> dict:
+    frames = sample["image"].unsqueeze(0).repeat(clip_len, 1, 1, 1)
+    masks = sample["gt_masks"].unsqueeze(1).repeat(1, clip_len, 1, 1, 1)
+    has_object = sample["has_object"].unsqueeze(1).repeat(1, clip_len)
+    return {
+        "frames": frames,
+        "gt_masks": masks,
+        "has_object": has_object,
+        "frame0_prompts": sample["prompts"],
+        "correction_frames": [],
+        "video_id": "sa1b_image",
+    }
+
+
+class MixedVideoImageDataset(Dataset):
+    """Mix SA-V-style video clips with SA-1B-style images during video training."""
+
+    def __init__(
+        self,
+        video_dataset: VideoSegmentationDataset,
+        image_dataset: ImageSegmentationDataset,
+        image_mix_prob: float = 0.1,
+        seed: Optional[int] = None,
+    ):
+        self.video_dataset = video_dataset
+        self.image_dataset = image_dataset
+        self.image_mix_prob = max(0.0, min(1.0, float(image_mix_prob)))
+        self.rng = random.Random(seed)
+
+    def __len__(self) -> int:
+        return len(self.video_dataset)
+
+    def __getitem__(self, idx: int) -> dict:
+        if self.image_mix_prob > 0 and self.rng.random() < self.image_mix_prob:
+            image_idx = self.rng.randrange(len(self.image_dataset))
+            sample = self.image_dataset[image_idx]
+            return _image_sample_to_video_sample(sample, self.video_dataset.clip_len)
+        return self.video_dataset[idx]
 
 
 def collate_video_batch(batch: list[dict]) -> dict:
