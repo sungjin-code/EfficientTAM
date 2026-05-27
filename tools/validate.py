@@ -60,6 +60,9 @@ def _resolve_standard_layout(val_root: Path) -> tuple[Path, Path] | None:
         # DAVIS trainval zip extracts as JPEGImages/480p and Annotations/480p.
         (val_root / "JPEGImages" / "480p", val_root / "Annotations" / "480p"),
         (val_root / "JPEGImages", val_root / "Annotations"),
+        (val_root / "valid" / "JPEGImages", val_root / "valid" / "Annotations"),
+        (val_root / "val" / "JPEGImages", val_root / "val" / "Annotations"),
+        (val_root / "test" / "JPEGImages", val_root / "test" / "Annotations"),
     ]
     for jpeg_root, ann_root in candidates:
         if _has_video_dirs(jpeg_root, ann_root):
@@ -68,10 +71,15 @@ def _resolve_standard_layout(val_root: Path) -> tuple[Path, Path] | None:
 
 
 def _resolve_sav_layout(val_root: Path) -> tuple[Path, Path] | None:
-    jpeg_root = val_root / "JPEGImages_24fps"
-    ann_root = val_root / "Annotations_6fps"
-    if _has_video_dirs(jpeg_root, ann_root):
-        return jpeg_root, ann_root
+    candidates = [
+        (val_root / "JPEGImages_24fps", val_root / "Annotations_6fps"),
+        (val_root / "valid" / "JPEGImages_24fps", val_root / "valid" / "Annotations_6fps"),
+        (val_root / "val" / "JPEGImages_24fps", val_root / "val" / "Annotations_6fps"),
+        (val_root / "test" / "JPEGImages_24fps", val_root / "test" / "Annotations_6fps"),
+    ]
+    for jpeg_root, ann_root in candidates:
+        if _has_video_dirs(jpeg_root, ann_root):
+            return jpeg_root, ann_root
     return None
 
 
@@ -109,7 +117,15 @@ def evaluate(predictor, val_root: Path, max_videos: int | None) -> dict:
         frames = sorted(frames_dir.glob("*.jpg"))
         if not frames:
             continue
-        first_ann = _load_palette_mask(ann_dir / (frames[0].stem + ".png"))
+        annotated_frames = [
+            (idx, fp, ann_dir / (fp.stem + ".png"))
+            for idx, fp in enumerate(frames)
+            if (ann_dir / (fp.stem + ".png")).is_file()
+        ]
+        if not annotated_frames:
+            continue
+        first_frame_idx, _, first_ann_path = annotated_frames[0]
+        first_ann = _load_palette_mask(first_ann_path)
         obj_ids = [int(i) for i in np.unique(first_ann) if i != 0]
         if not obj_ids:
             continue
@@ -117,11 +133,14 @@ def evaluate(predictor, val_root: Path, max_videos: int | None) -> dict:
         state = predictor.init_state(str(frames_dir))
         H, W = first_ann.shape
 
-        # Seed every object with its GT mask on frame 0.
+        # Seed every object with its GT mask on the first annotated frame.
         for obj_id in obj_ids:
             gt0 = _binary_obj_mask(first_ann, obj_id)
             predictor.add_new_mask(
-                state, frame_idx=0, obj_id=obj_id, mask=torch.from_numpy(gt0).bool()
+                state,
+                frame_idx=first_frame_idx,
+                obj_id=obj_id,
+                mask=torch.from_numpy(gt0).bool(),
             )
 
         # Propagate; collect per-object high-res masks per frame.
@@ -139,8 +158,8 @@ def evaluate(predictor, val_root: Path, max_videos: int | None) -> dict:
         for oid in obj_ids:
             gt_seq = []
             pr_seq = []
-            for frame_idx, fp in enumerate(frames):
-                gt_palette = _load_palette_mask(ann_dir / (fp.stem + ".png"))
+            for frame_idx, _, ann_path in annotated_frames:
+                gt_palette = _load_palette_mask(ann_path)
                 gt_bin = _binary_obj_mask(gt_palette, oid)
                 pr = pred_per_obj[oid].get(frame_idx)
                 if pr is None:

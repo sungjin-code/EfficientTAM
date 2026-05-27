@@ -1,4 +1,4 @@
-"""Run DAVIS-style J/F validation across the paper VOS benchmark roots."""
+"""Run VOS validation across the paper benchmark roots."""
 
 from __future__ import annotations
 
@@ -21,6 +21,14 @@ BENCHMARK_ENV = {
     "ytvos": "VAL_ROOT_YTVOS",
 }
 
+BENCHMARK_PRIMARY_METRIC = {
+    "mose": "J&F",
+    "davis": "J&F",
+    "lvos": "J&F",
+    "sav": "J&F",
+    "ytvos": "G",
+}
+
 
 def _resolve_roots(args: argparse.Namespace) -> dict[str, Path]:
     roots: dict[str, Path] = {}
@@ -29,6 +37,20 @@ def _resolve_roots(args: argparse.Namespace) -> dict[str, Path]:
         if value:
             roots[name] = Path(value)
     return roots
+
+
+def _apply_paper_metric_name(name: str, result: dict) -> dict:
+    primary_metric = BENCHMARK_PRIMARY_METRIC[name]
+    result["primary_metric"] = primary_metric
+
+    if primary_metric == "G":
+        result["G_mean"] = result.pop("JF_mean")
+        for video_result in result.get("per_video", {}).values():
+            video_result["G"] = video_result.pop("JF")
+        result["primary_score"] = result["G_mean"]
+    else:
+        result["primary_score"] = result["JF_mean"]
+    return result
 
 
 def main() -> None:
@@ -74,18 +96,19 @@ def main() -> None:
             continue
         print(f"[validate_vos_suite] evaluating {name} at {root}")
         res = evaluate(predictor, root, args.max_videos)
+        res = _apply_paper_metric_name(name, res)
         res["status"] = "ok"
         res["root"] = str(root)
         results[name] = res
 
     ok = {k: v for k, v in results.items() if v.get("status") == "ok"}
     if ok:
-        mean_jf = sum(float(v["JF_mean"]) for v in ok.values()) / len(ok)
+        mean_score = sum(float(v["primary_score"]) for v in ok.values()) / len(ok)
     else:
-        mean_jf = 0.0
+        mean_score = 0.0
     summary = {
         "benchmarks": results,
-        "mean_JF_over_evaluated_benchmarks": mean_jf,
+        "mean_primary_score_over_evaluated_benchmarks": mean_score,
         "n_evaluated_benchmarks": len(ok),
     }
     out = Path(args.output_json)

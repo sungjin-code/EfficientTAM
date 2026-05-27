@@ -8,12 +8,14 @@ frames_*
 notebooks/output_*
 outputs/
 /sample*
+/_*
+/tmp*
 
 # sample media (large binary assets)
 figs/
-examples/
 notebooks/videos/
 notebooks/images/
+/paper.pdf
 
 # python
 .venv/
@@ -23,6 +25,7 @@ __pycache__/
 
 # secrets
 .env
+data/SA-*.txt
 
 # tools
 .DS_Store

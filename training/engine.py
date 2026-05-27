@@ -9,11 +9,13 @@ inference predictor.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import time
 import traceback
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Iterable, Optional
 
 import torch
@@ -608,6 +610,60 @@ def save_checkpoint(
     }
     tmp_path = f"{path}.tmp"
     torch.save(payload, tmp_path)
+    os.replace(tmp_path, path)
+
+
+def _file_artifact(path: str | os.PathLike | None) -> dict:
+    if path is None:
+        return {"path": None, "exists": False, "size_bytes": 0}
+    path_str = str(path)
+    exists = os.path.isfile(path_str)
+    return {
+        "path": path_str,
+        "exists": exists,
+        "size_bytes": os.path.getsize(path_str) if exists else 0,
+    }
+
+
+def save_training_artifact(
+    path: str | os.PathLike,
+    *,
+    stage: str,
+    status: str,
+    state: TrainState,
+    total_steps: int,
+    output_dir: str | os.PathLike,
+    latest_checkpoint: str | os.PathLike,
+    final_checkpoint: str | os.PathLike | None = None,
+    epoch_checkpoint: str | os.PathLike | None = None,
+    interrupt_checkpoint: str | os.PathLike | None = None,
+    metrics: Optional[dict] = None,
+    extra: Optional[dict] = None,
+) -> None:
+    """Write a machine-readable training status artifact atomically."""
+    payload = {
+        "stage": stage,
+        "status": status,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "step": int(state.step),
+        "epoch": int(state.epoch),
+        "total_steps": int(total_steps),
+        "completed_expected_steps": int(state.step) >= int(total_steps),
+        "output_dir": str(output_dir),
+        "checkpoints": {
+            "latest": _file_artifact(latest_checkpoint),
+            "final": _file_artifact(final_checkpoint),
+            "epoch": _file_artifact(epoch_checkpoint),
+            "interrupt": _file_artifact(interrupt_checkpoint),
+        },
+        "metrics": metrics or {},
+    }
+    if extra:
+        payload["extra"] = extra
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+        f.write("\n")
     os.replace(tmp_path, path)
 
 

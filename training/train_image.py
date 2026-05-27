@@ -38,6 +38,7 @@ from training.engine import (
     TrainState,
     load_checkpoint,
     save_checkpoint,
+    save_training_artifact,
     train_one_epoch_image,
 )
 from training.losses import LossWeights, MultiStepLoss
@@ -275,6 +276,7 @@ def main() -> None:
         )
 
     latest_path = out_dir / "image_latest.pt"
+    artifact_path = out_dir / "image_training_artifact.json"
     last_epoch_result: dict = {}
     exit_status = "ok"
     try:
@@ -306,6 +308,22 @@ def main() -> None:
                 save_checkpoint(model, optimizer, scheduler, str(ckpt_path), state)
                 save_checkpoint(model, optimizer, scheduler, str(latest_path), state)
                 print(f"[train_image] saved {ckpt_path}")
+                save_training_artifact(
+                    artifact_path,
+                    stage="image",
+                    status="running",
+                    state=state,
+                    total_steps=total_steps,
+                    output_dir=out_dir,
+                    latest_checkpoint=latest_path,
+                    epoch_checkpoint=ckpt_path,
+                    metrics=last_epoch_result,
+                    extra={
+                        "config_name": args.config,
+                        "data_root": args.data_root,
+                        "precision": args.precision,
+                    },
+                )
                 logger.log({"checkpoint/epoch": epoch}, step=state.step)
     except KeyboardInterrupt:
         exit_status = "interrupted"
@@ -327,6 +345,22 @@ def main() -> None:
                         model, optimizer, scheduler, str(latest_path), state
                     )
                     print(f"[train_image] emergency checkpoint saved at {emergency}")
+                    save_training_artifact(
+                        artifact_path,
+                        stage="image",
+                        status=exit_status,
+                        state=state,
+                        total_steps=total_steps,
+                        output_dir=out_dir,
+                        latest_checkpoint=latest_path,
+                        interrupt_checkpoint=emergency,
+                        metrics=last_epoch_result,
+                        extra={
+                            "config_name": args.config,
+                            "data_root": args.data_root,
+                            "precision": args.precision,
+                        },
+                    )
                 except Exception:
                     print("[train_image] emergency save FAILED", file=sys.stderr)
                     traceback.print_exc()
@@ -337,6 +371,22 @@ def main() -> None:
             save_checkpoint(model, optimizer, scheduler, str(final_path), state)
             save_checkpoint(model, optimizer, scheduler, str(latest_path), state)
             print(f"[train_image] done. final={final_path}")
+            save_training_artifact(
+                artifact_path,
+                stage="image",
+                status=exit_status,
+                state=state,
+                total_steps=total_steps,
+                output_dir=out_dir,
+                latest_checkpoint=latest_path,
+                final_checkpoint=final_path,
+                metrics=last_epoch_result,
+                extra={
+                    "config_name": args.config,
+                    "data_root": args.data_root,
+                    "precision": args.precision,
+                },
+            )
     else:
         final_path = latest_path
 
