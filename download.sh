@@ -66,6 +66,7 @@ echo "========================================================="
 have_stage1=false
 have_stage2=false
 have_val=false
+failed_downloads=()
 
 image_layout_ready() {
     [ -d "$1/images" ] && [ -d "$1/masks" ] \
@@ -125,6 +126,7 @@ download_manifest() {
 
     if [ ! -f "$manifest" ]; then
         echo "Error: manifest not found: $manifest" >&2
+        echo "  Download the manifest file from the dataset's official page and place it in $ROOT_DIR/data/" >&2
         exit 1
     fi
     mkdir -p "$archive_dir"
@@ -217,6 +219,39 @@ extract_tars_flat() {
     done
 }
 
+extract_and_convert_sa1b() {
+    local archive_dir="$1"
+    local extract_dir="$2"
+    local output_dir="$3"
+    local tmp_shard="$extract_dir/_shard_tmp"
+
+    find "$archive_dir" -maxdepth 1 -type f -name "*.tar" | sort | while read -r tar_path; do
+        local shard_name
+        shard_name="$(basename "$tar_path" .tar)"
+        local stamp="$output_dir/.converted_${shard_name}.stamp"
+        if [ -f "$stamp" ]; then
+            echo "      already converted: $(basename "$tar_path")"
+            continue
+        fi
+        echo "      extracting: $(basename "$tar_path")"
+        rm -rf "$tmp_shard"
+        mkdir -p "$tmp_shard"
+        tar -xf "$tar_path" -C "$tmp_shard"
+
+        echo "      converting shard: $shard_name"
+        $PYTHON "$ROOT_DIR/data/prepare_sa1b.py" \
+            --input_dir "$tmp_shard" \
+            --output_dir "$output_dir" \
+            --progress_every 0
+
+        rm -rf "$tmp_shard"
+        touch "$stamp"
+        if [ "$KEEP_ARCHIVES" != "1" ]; then
+            rm "$tar_path"
+        fi
+    done
+}
+
 extract_archives_in_place() {
     local target_dir="$1"
     find "$target_dir" -maxdepth 2 -type f \( \
@@ -281,11 +316,32 @@ download_gdrive_file() {
             file_id="${file_id%%&*}"
             ;;
     esac
-    if [ "$file_id" != "$url" ]; then
-        gdown "https://drive.google.com/uc?id=$file_id" -O "$output"
-    else
-        gdown "$url" -O "$output"
+    local gdrive_url="https://drive.google.com/uc?id=$file_id"
+    [ "$file_id" = "$url" ] && gdrive_url="$url"
+
+    local cookie_args=()
+    if [ -n "${GDRIVE_COOKIES:-}" ] && [ -f "$GDRIVE_COOKIES" ]; then
+        cookie_args=(--cookies "$GDRIVE_COOKIES")
     fi
+
+    local fuzzy_args=()
+    if gdown --help 2>/dev/null | grep -q -- "--fuzzy"; then
+        fuzzy_args=(--fuzzy)
+    fi
+
+    if gdown "${fuzzy_args[@]}" "${cookie_args[@]}" "$gdrive_url" -O "$output"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "      Google Drive download failed for: $(basename "$output")" >&2
+    echo "      To fix, choose one of:" >&2
+    echo "        A) Download manually from browser and save to:" >&2
+    echo "             $output" >&2
+    echo "        B) Export cookies from a logged-in Chrome/Firefox session:" >&2
+    echo "             pip install browser-cookie3  # or use 'Get cookies.txt' extension" >&2
+    echo "             GDRIVE_COOKIES=/path/to/cookies.txt bash download.sh" >&2
+    return 1
 }
 
 download_gdrive_folder() {
@@ -330,7 +386,10 @@ download_davis() {
 }
 
 if [ "$DOWNLOAD_DAVIS" = "1" ]; then
-    download_davis
+    if ! download_davis; then
+        failed_downloads+=("DAVIS [https://data.vision.ee.ethz.ch/csergi/share/davis/]")
+        echo "[warn] DAVIS download failed, skipping." >&2
+    fi
 else
     echo "[1/3] Skipping DAVIS download because DOWNLOAD_DAVIS=$DOWNLOAD_DAVIS."
     if davis_layout_ready "$DAVIS_DIR"; then
@@ -343,8 +402,14 @@ if [ "$DOWNLOAD_MOSE" = "1" ]; then
         echo "[eval] MOSE validation data already exists."
     else
         echo "[eval] Downloading MOSE validation data from Hugging Face."
-        download_hf_dataset "$MOSE_HF_REPO" "$MOSE_DIR" --include "*valid*"
-        extract_archives_in_place "$MOSE_DIR"
+        if ! (
+            set -euo pipefail
+            download_hf_dataset "$MOSE_HF_REPO" "$MOSE_DIR" --include "*valid*"
+            extract_archives_in_place "$MOSE_DIR"
+        ); then
+            failed_downloads+=("MOSE [HuggingFace: $MOSE_HF_REPO]")
+            echo "[warn] MOSE download failed, skipping." >&2
+        fi
     fi
 fi
 
@@ -353,15 +418,21 @@ if [ "$DOWNLOAD_LVOS" = "1" ]; then
         echo "[eval] LVOS validation data already exists."
     else
         echo "[eval] Downloading LVOS validation data from Google Drive."
-        LVOS_ARCHIVE_DIR="$RAW_DIR/lvos_archives"
-        mkdir -p "$LVOS_ARCHIVE_DIR"
-        download_gdrive_file "$LVOS_GDRIVE_URL" "$LVOS_ARCHIVE_DIR/lvos_val.zip"
-        mkdir -p "$LVOS_DIR"
-        unzip -q -n "$LVOS_ARCHIVE_DIR/lvos_val.zip" -d "$LVOS_DIR"
-        if [ -d "$LVOS_DIR/LVOS" ] && [ ! -d "$LVOS_DIR/JPEGImages" ]; then
-            find "$LVOS_DIR/LVOS" -mindepth 1 -maxdepth 1 -exec mv {} "$LVOS_DIR" \;
-        elif [ -d "$LVOS_DIR/lvos" ] && [ ! -d "$LVOS_DIR/JPEGImages" ]; then
-            find "$LVOS_DIR/lvos" -mindepth 1 -maxdepth 1 -exec mv {} "$LVOS_DIR" \;
+        if ! (
+            set -euo pipefail
+            _archive_dir="$RAW_DIR/lvos_archives"
+            mkdir -p "$_archive_dir"
+            download_gdrive_file "$LVOS_GDRIVE_URL" "$_archive_dir/lvos_val.zip" || exit 1
+            mkdir -p "$LVOS_DIR"
+            unzip -q -n "$_archive_dir/lvos_val.zip" -d "$LVOS_DIR"
+            if [ -d "$LVOS_DIR/LVOS" ] && [ ! -d "$LVOS_DIR/JPEGImages" ]; then
+                find "$LVOS_DIR/LVOS" -mindepth 1 -maxdepth 1 -exec mv {} "$LVOS_DIR" \;
+            elif [ -d "$LVOS_DIR/lvos" ] && [ ! -d "$LVOS_DIR/JPEGImages" ]; then
+                find "$LVOS_DIR/lvos" -mindepth 1 -maxdepth 1 -exec mv {} "$LVOS_DIR" \;
+            fi
+        ); then
+            failed_downloads+=("LVOS [Google Drive: $LVOS_GDRIVE_URL]")
+            echo "[warn] LVOS download failed, skipping." >&2
         fi
     fi
 fi
@@ -371,9 +442,15 @@ if [ "$DOWNLOAD_SAV_TEST" = "1" ]; then
         echo "[eval] SA-V test data already exists."
     else
         echo "[eval] Downloading SA-V test data from $SAV_MANIFEST"
-        SAV_EVAL_ARCHIVE_DIR="$RAW_DIR/sav_eval_archives"
-        download_manifest "$SAV_MANIFEST" "$SAV_EVAL_ARCHIVE_DIR" '^sav_test[.]tar$' 0
-        extract_tars_flat "$SAV_EVAL_ARCHIVE_DIR" "$SAV_TEST_DIR"
+        if ! (
+            set -euo pipefail
+            _archive_dir="$RAW_DIR/sav_eval_archives"
+            download_manifest "$SAV_MANIFEST" "$_archive_dir" '^sav_test[.]tar$' 0
+            extract_tars_flat "$_archive_dir" "$SAV_TEST_DIR"
+        ); then
+            failed_downloads+=("SA-V test [$SAV_MANIFEST]")
+            echo "[warn] SA-V test download failed, skipping." >&2
+        fi
     fi
 fi
 
@@ -382,8 +459,14 @@ if [ "$DOWNLOAD_YTVOS" = "1" ]; then
         echo "[eval] YTVOS 2019 validation data already exists."
     else
         echo "[eval] Downloading YTVOS 2019 validation data from Google Drive."
-        download_gdrive_folder "$YTVOS_GDRIVE_URL" "$YTVOS_DIR"
-        extract_archives_in_place "$YTVOS_DIR"
+        if ! (
+            set -euo pipefail
+            download_gdrive_folder "$YTVOS_GDRIVE_URL" "$YTVOS_DIR"
+            extract_archives_in_place "$YTVOS_DIR"
+        ); then
+            failed_downloads+=("YTVOS 2019 [Google Drive: $YTVOS_GDRIVE_URL]")
+            echo "[warn] YTVOS 2019 download failed, skipping." >&2
+        fi
     fi
 fi
 
@@ -392,28 +475,39 @@ if image_layout_ready "$SA1B_DIR"; then
     have_stage1=true
 elif [ -n "${SA1B_RAW_DIR:-}" ]; then
     echo "[2/3] Converting SA-1B raw dump from $SA1B_RAW_DIR"
-    $PYTHON "$ROOT_DIR/data/prepare_sa1b.py" \
-        --input_dir "$SA1B_RAW_DIR" \
-        --output_dir "$SA1B_DIR"
-    if [ -d "$SA1B_DIR/images" ] && [ -d "$SA1B_DIR/masks" ]; then
+    if ! (
+        set -euo pipefail
+        $PYTHON "$ROOT_DIR/data/prepare_sa1b.py" \
+            --input_dir "$SA1B_RAW_DIR" \
+            --output_dir "$SA1B_DIR"
+    ); then
+        failed_downloads+=("SA-1B conversion from $SA1B_RAW_DIR")
+        echo "[warn] SA-1B conversion failed, skipping." >&2
+    fi
+    if image_layout_ready "$SA1B_DIR"; then
         have_stage1=true
     fi
 elif [ "$DOWNLOAD_SA1B" = "1" ]; then
     echo "[2/3] Downloading and preparing SA-1B from $SA1B_MANIFEST"
-    SA1B_ARCHIVE_DIR="$RAW_DIR/sa1b_archives"
-    SA1B_EXTRACT_DIR="$RAW_DIR/sa1b_extracted"
-    download_manifest "$SA1B_MANIFEST" "$SA1B_ARCHIVE_DIR" '^sa_.*[.]tar$' "${SA1B_LIMIT:-0}"
-    if [ "$EXTRACT_DATASETS" = "1" ]; then
-        extract_tars "$SA1B_ARCHIVE_DIR" "$SA1B_EXTRACT_DIR"
-        echo "      converting SA-1B to $SA1B_DIR"
-        $PYTHON "$ROOT_DIR/data/prepare_sa1b.py" \
-            --input_dir "$SA1B_EXTRACT_DIR" \
-            --output_dir "$SA1B_DIR"
-        if image_layout_ready "$SA1B_DIR"; then
-            have_stage1=true
+    if ! (
+        set -euo pipefail
+        _archive_dir="$RAW_DIR/sa1b_archives"
+        _extract_dir="$RAW_DIR/sa1b_extracted"
+        download_manifest "$SA1B_MANIFEST" "$_archive_dir" '^sa_.*[.]tar$' "${SA1B_LIMIT:-0}"
+        if [ "$EXTRACT_DATASETS" = "1" ]; then
+            mkdir -p "$_extract_dir"
+            mkdir -p "$SA1B_DIR"
+            echo "      converting SA-1B to $SA1B_DIR (one shard at a time to save disk)"
+            extract_and_convert_sa1b "$_archive_dir" "$_extract_dir" "$SA1B_DIR"
+        else
+            echo "      skipped SA-1B extraction because EXTRACT_DATASETS=$EXTRACT_DATASETS"
         fi
-    else
-        echo "      skipped SA-1B extraction because EXTRACT_DATASETS=$EXTRACT_DATASETS"
+    ); then
+        failed_downloads+=("SA-1B [$SA1B_MANIFEST]")
+        echo "[warn] SA-1B download failed, skipping." >&2
+    fi
+    if image_layout_ready "$SA1B_DIR"; then
+        have_stage1=true
     fi
 else
     echo "[2/3] Missing SA-1B-style image data."
@@ -426,33 +520,45 @@ if video_layout_ready "$SAV_DIR"; then
     have_stage2=true
 elif [ -n "${SAV_RAW_DIR:-}" ]; then
     echo "[3/3] Converting SA-V raw dump from $SAV_RAW_DIR"
-    $PYTHON "$ROOT_DIR/data/prepare_sav.py" \
-        --input-dir "$SAV_RAW_DIR" \
-        --output-dir "$SAV_DIR" \
-        --annotation-kind "${SAV_ANNOTATION_KIND:-both}" \
-        --annotation-stride "${SAV_ANNOTATION_STRIDE:-4}"
-    if [ -d "$SAV_DIR/JPEGImages" ] && [ -d "$SAV_DIR/Annotations" ]; then
+    if ! (
+        set -euo pipefail
+        $PYTHON "$ROOT_DIR/data/prepare_sav.py" \
+            --input-dir "$SAV_RAW_DIR" \
+            --output-dir "$SAV_DIR" \
+            --annotation-kind "${SAV_ANNOTATION_KIND:-both}" \
+            --annotation-stride "${SAV_ANNOTATION_STRIDE:-4}"
+    ); then
+        failed_downloads+=("SA-V conversion from $SAV_RAW_DIR")
+        echo "[warn] SA-V conversion failed, skipping." >&2
+    fi
+    if video_layout_ready "$SAV_DIR"; then
         have_stage2=true
     fi
 elif [ "$DOWNLOAD_SAV" = "1" ]; then
     echo "[3/3] Downloading and preparing SA-V from $SAV_MANIFEST"
-    SAV_ARCHIVE_DIR="$RAW_DIR/sav_archives"
-    SAV_EXTRACT_DIR="$RAW_DIR/sav_extracted"
-    download_manifest "$SAV_MANIFEST" "$SAV_ARCHIVE_DIR" '^(sav_[0-9][0-9][0-9][.]tar|videos_fps_24[.]tar|videos_fps_6[.]tar)$' "${SAV_LIMIT:-0}"
-    download_manifest "$SAV_MANIFEST" "$SAV_ARCHIVE_DIR" '^sav_.*sum[.]chk' 0
-    if [ "$EXTRACT_DATASETS" = "1" ]; then
-        extract_tars "$SAV_ARCHIVE_DIR" "$SAV_EXTRACT_DIR"
-        echo "      converting SA-V to $SAV_DIR"
-        $PYTHON "$ROOT_DIR/data/prepare_sav.py" \
-            --input-dir "$SAV_EXTRACT_DIR" \
-            --output-dir "$SAV_DIR" \
-            --annotation-kind "${SAV_ANNOTATION_KIND:-both}" \
-            --annotation-stride "${SAV_ANNOTATION_STRIDE:-4}"
-        if video_layout_ready "$SAV_DIR"; then
-            have_stage2=true
+    if ! (
+        set -euo pipefail
+        _archive_dir="$RAW_DIR/sav_archives"
+        _extract_dir="$RAW_DIR/sav_extracted"
+        download_manifest "$SAV_MANIFEST" "$_archive_dir" '^(sav_[0-9][0-9][0-9][.]tar|videos_fps_24[.]tar|videos_fps_6[.]tar)$' "${SAV_LIMIT:-0}"
+        download_manifest "$SAV_MANIFEST" "$_archive_dir" '^sav_.*sum[.]chk' 0
+        if [ "$EXTRACT_DATASETS" = "1" ]; then
+            extract_tars "$_archive_dir" "$_extract_dir"
+            echo "      converting SA-V to $SAV_DIR"
+            $PYTHON "$ROOT_DIR/data/prepare_sav.py" \
+                --input-dir "$_extract_dir" \
+                --output-dir "$SAV_DIR" \
+                --annotation-kind "${SAV_ANNOTATION_KIND:-both}" \
+                --annotation-stride "${SAV_ANNOTATION_STRIDE:-4}"
+        else
+            echo "      skipped SA-V extraction because EXTRACT_DATASETS=$EXTRACT_DATASETS"
         fi
-    else
-        echo "      skipped SA-V extraction because EXTRACT_DATASETS=$EXTRACT_DATASETS"
+    ); then
+        failed_downloads+=("SA-V [$SAV_MANIFEST]")
+        echo "[warn] SA-V download failed, skipping." >&2
+    fi
+    if video_layout_ready "$SAV_DIR"; then
+        have_stage2=true
     fi
 else
     echo "[3/3] Missing SA-V-style video data."
@@ -461,6 +567,15 @@ else
     echo "      The converted output will use this layout:"
     echo "      $SAV_DIR/JPEGImages/{video_id}/00000.jpg"
     echo "      $SAV_DIR/Annotations/{video_id}/00000.png"
+fi
+
+if [ "${#failed_downloads[@]}" -gt 0 ]; then
+    echo ""
+    echo "========= FAILED DOWNLOADS ========="
+    for _item in "${failed_downloads[@]}"; do
+        echo "  - $_item"
+    done
+    echo "====================================="
 fi
 
 echo ""
