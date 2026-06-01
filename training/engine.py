@@ -19,8 +19,8 @@ from datetime import datetime, timezone
 from typing import Iterable, Optional
 
 import torch
-import torch.nn.functional as F
 
+from efficient_track_anything.utils.misc import concat_points
 from training.data.prompts import PromptSampler
 from training.distributed import average_gradients, unwrap_model
 from training.losses import MultiStepLoss
@@ -50,6 +50,33 @@ def _store_frame(output_dict: dict, t: int, is_cond: bool, current_out: dict) ->
     output_dict[bucket][t] = current_out
 
 
+def _sample_correction_inputs(
+    prompt_sampler: PromptSampler,
+    gt_masks_t: torch.Tensor,
+    pred_logits: torch.Tensor,
+    has_object_t: torch.Tensor,
+    correction_frames: list[list[int]],
+    frame_idx: int,
+    device: torch.device,
+) -> Optional[dict]:
+    coord_list = []
+    label_list = []
+    for b in range(gt_masks_t.shape[0]):
+        if frame_idx in correction_frames[b] and has_object_t[b] > 0:
+            sample = prompt_sampler.sample_correction(
+                gt_masks_t[b].float(),
+                pred_logits[b].detach(),
+            )
+            coord_list.append(sample.point_coords)
+            label_list.append(sample.point_labels)
+        else:
+            coord_list.append(torch.zeros(1, 2))
+            label_list.append(torch.tensor([-1], dtype=torch.int32))
+    coords = torch.stack(coord_list, dim=0).to(device)
+    labels = torch.stack(label_list, dim=0).to(device)
+    return _make_point_inputs(coords, labels)
+
+
 def forward_clip(
     model: torch.nn.Module,
     frames: torch.Tensor,  # [B, T, 3, H, W] (normalized)
@@ -64,6 +91,8 @@ def forward_clip(
     prompt_sampler: PromptSampler,
     loss_fn: MultiStepLoss,
     run_mem_encoder: bool,
+    num_correction_points_per_frame: int = 1,
+    add_correction_frames_as_cond: bool = False,
 ) -> ClipOutput:
     model = unwrap_model(model)
     B, T = frames.shape[:2]
@@ -77,11 +106,6 @@ def forward_clip(
         backbone_out
     )
     # vision_feats / vision_pos: list of [HW, B*T, C]
-    last_feat = vision_feats[-1]  # [HW, B*T, C]
-    last_pos = vision_pos[-1]  # [HW, B*T, C]
-    HW = last_feat.shape[0]
-    C = last_feat.shape[-1]
-
     # 2. Per-frame loop. Keep an output_dict that mirrors the inference predictor.
     output_dict: dict = {"cond_frame_outputs": {}, "non_cond_frame_outputs": {}}
     total_loss = frames.new_zeros(())
@@ -104,27 +128,9 @@ def forward_clip(
                 frame0_point_inputs["point_coords"].to(device),
                 frame0_point_inputs["point_labels"].to(device),
             )
-        elif last_high_res is not None and any(t in cf for cf in correction_frames):
-            # Sample one correction click per clip-in-batch (independent per sample).
-            coord_list = []
-            label_list = []
-            for b in range(B):
-                if t in correction_frames[b] and has_object[b, t] > 0:
-                    sample = prompt_sampler.sample_correction(
-                        gt_masks[b, t].float(),
-                        last_high_res[b].detach(),
-                    )
-                    coord_list.append(sample.point_coords)
-                    label_list.append(sample.point_labels)
-                else:
-                    coord_list.append(torch.zeros(1, 2))
-                    label_list.append(torch.tensor([-1], dtype=torch.int32))
-            coords = torch.stack(coord_list, dim=0).to(device)
-            labels = torch.stack(label_list, dim=0).to(device)
-            point_inputs = _make_point_inputs(coords, labels)
 
         # Forward through the track step. _track_step gives us the full sam_outputs.
-        current_out, sam_outputs, _, _ = model._track_step(
+        current_out, sam_outputs, high_res_features, pix_feat = model._track_step(
             frame_idx=t,
             is_init_cond_frame=is_init,
             current_vision_feats=feats_t,
@@ -146,14 +152,57 @@ def forward_clip(
             obj_ptr,
             object_score_logits,
         ) = sam_outputs
+        multistep_masks = [high_res_multimasks]
+        multistep_ious = [ious]
+        multistep_obj_logits = [object_score_logits]
+
+        is_correction = any(t in cf for cf in correction_frames)
+        if is_correction and num_correction_points_per_frame > 0:
+            for _ in range(num_correction_points_per_frame):
+                new_point_inputs = _sample_correction_inputs(
+                    prompt_sampler=prompt_sampler,
+                    gt_masks_t=gt_masks[:, t],
+                    pred_logits=high_res_masks,
+                    has_object_t=has_object[:, t],
+                    correction_frames=correction_frames,
+                    frame_idx=t,
+                    device=device,
+                )
+                if new_point_inputs is None:
+                    continue
+                point_inputs = concat_points(
+                    point_inputs,
+                    new_point_inputs["point_coords"],
+                    new_point_inputs["point_labels"],
+                )
+                multimask_output = model._use_multimask(is_init, point_inputs)
+                sam_outputs = model._forward_sam_heads(
+                    backbone_features=pix_feat,
+                    point_inputs=point_inputs,
+                    mask_inputs=low_res_masks,
+                    high_res_features=high_res_features,
+                    multimask_output=multimask_output,
+                )
+                (
+                    low_res_multimasks,
+                    high_res_multimasks,
+                    ious,
+                    low_res_masks,
+                    high_res_masks,
+                    obj_ptr,
+                    object_score_logits,
+                ) = sam_outputs
+                multistep_masks.append(high_res_multimasks)
+                multistep_ious.append(ious)
+                multistep_obj_logits.append(object_score_logits)
 
         # Per-frame loss — supervise at high-res (image_size) as in SAM/SAM2.
         # `high_res_multimasks` is bilinear-upsampled from the H/4 head to (image_size, image_size).
         gt_full = gt_masks[:, t].float()
         frame_loss, metrics = loss_fn(
-            mask_logits=high_res_multimasks,
-            ious=ious,
-            object_score_logits=object_score_logits,
+            mask_logits=multistep_masks,
+            ious=multistep_ious,
+            object_score_logits=multistep_obj_logits,
             gt_mask=gt_full,
             has_object=has_object[:, t],
         )
@@ -167,8 +216,7 @@ def forward_clip(
         current_out["obj_ptr"] = obj_ptr
         current_out["object_score_logits"] = object_score_logits
 
-        is_correction = (point_inputs is not None) and not is_init
-        is_cond = is_init or is_correction
+        is_cond = is_init or (add_correction_frames_as_cond and is_correction)
 
         # Run memory encoder so future frames can attend (video stage only).
         if run_mem_encoder and T > 1:
@@ -445,6 +493,8 @@ def train_one_epoch_video(
     max_steps: int | None = None,
     precision: str = "auto",
     logger: Optional[WandbLogger] = None,
+    num_correction_points_per_frame: int = 1,
+    add_correction_frames_as_cond: bool = False,
 ) -> dict:
     model.train()
     accumulation_steps = max(1, int(accumulation_steps))
@@ -493,6 +543,8 @@ def train_one_epoch_video(
                 prompt_sampler=prompt_sampler,
                 loss_fn=loss_fn,
                 run_mem_encoder=True,
+                num_correction_points_per_frame=num_correction_points_per_frame,
+                add_correction_frames_as_cond=add_correction_frames_as_cond,
             )
             loss = out.total_loss
 

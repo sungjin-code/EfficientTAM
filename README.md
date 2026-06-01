@@ -99,6 +99,8 @@ RUN_DOWNLOAD=0 RUN_SMOKE_TEST=0 ./main.sh
 
 ## Train
 
+The training code is designed to be compatible with the SAM 2 training recipe, not a drop-in replacement for the upstream SAM 2 trainer. It follows the same two-stage image/video schedule, SAM2-style high-resolution multimask losses, best-of-K mask supervision, IoU/object-score losses, and iterative correction click training, while using EfficientTAM's own model configs and `_track_step` interface \[[#1](https://github.com/yformer/EfficientTAM/issues/1)\].
+
 Stage 1 image pretraining:
 
 ```bash

@@ -33,6 +33,10 @@ train:
   stride_choices: [1, 2, 3]
   correction_prob: 0.5
   max_correction_frames: 2
+  # SAM2-style iterative correction: each selected frame is first tracked, then
+  # corrected with extra click(s) using the previous low-res mask logits.
+  num_correction_points_per_frame: 1
+  add_correction_frames_as_cond: false
 
   prompt_mode: mixed
   max_neg_points: 0

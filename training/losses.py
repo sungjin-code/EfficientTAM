@@ -20,10 +20,7 @@ def sigmoid_focal_loss(
     alpha: float = 0.25,
     gamma: float = 2.0,
 ) -> torch.Tensor:
-    """Focal loss summed over spatial dims, normalized by the number of foreground pixels.
-
-    This matches the SAM / SAM2 reference convention. The published loss weight of 20
-    is calibrated for this normalization.
+    """Focal loss averaged over spatial dims, matching SAM2 training.
 
     Args:
         logits: [B, K, H, W]
@@ -40,9 +37,7 @@ def sigmoid_focal_loss(
     if alpha >= 0:
         alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
         loss = alpha_t * loss
-    # Sum over HW, normalize by num foreground pixels (clamped to 1).
-    num_pos = targets.flatten(2).sum(-1).clamp(min=1.0)  # [B, K]
-    return loss.flatten(2).sum(-1) / num_pos
+    return loss.flatten(2).mean(-1)
 
 
 def dice_loss(
@@ -106,11 +101,39 @@ class MultiStepLoss(torch.nn.Module):
 
     def forward(
         self,
+        mask_logits: torch.Tensor | list[torch.Tensor],
+        ious: torch.Tensor | list[torch.Tensor],
+        object_score_logits: torch.Tensor | list[torch.Tensor],
+        gt_mask: torch.Tensor,  # [B, 1, H, W] full-res GT
+        has_object: torch.Tensor,  # [B] in {0,1}
+    ) -> Tuple[torch.Tensor, dict]:
+        if isinstance(mask_logits, list):
+            assert isinstance(ious, list)
+            assert isinstance(object_score_logits, list)
+            total_loss = gt_mask.new_zeros(())
+            metric_sums: dict[str, torch.Tensor] = {}
+            for masks_i, ious_i, obj_i in zip(
+                mask_logits, ious, object_score_logits
+            ):
+                loss_i, metrics_i = self._forward_one(
+                    masks_i, ious_i, obj_i, gt_mask, has_object
+                )
+                total_loss = total_loss + loss_i
+                for k, v in metrics_i.items():
+                    metric_sums[k] = metric_sums.get(k, gt_mask.new_zeros(())) + v
+            return total_loss, metric_sums
+
+        return self._forward_one(
+            mask_logits, ious, object_score_logits, gt_mask, has_object
+        )
+
+    def _forward_one(
+        self,
         mask_logits: torch.Tensor,  # [B, K, H, W] high-res mask logits
         ious: torch.Tensor,  # [B, K]
         object_score_logits: torch.Tensor,  # [B, 1]
-        gt_mask: torch.Tensor,  # [B, 1, H, W] full-res GT
-        has_object: torch.Tensor,  # [B] in {0,1}
+        gt_mask: torch.Tensor,
+        has_object: torch.Tensor,
     ) -> Tuple[torch.Tensor, dict]:
         B, K = mask_logits.shape[:2]
         focal = sigmoid_focal_loss(

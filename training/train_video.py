@@ -333,6 +333,12 @@ def main() -> None:
                 max_steps=effective_max_steps,
                 precision=args.precision,
                 logger=logger,
+                num_correction_points_per_frame=train_cfg.get(
+                    "num_correction_points_per_frame", 1
+                ),
+                add_correction_frames_as_cond=train_cfg.get(
+                    "add_correction_frames_as_cond", False
+                ),
             )
             if dist_info.is_main:
                 ckpt_path = out_dir / f"video_epoch_{epoch:04d}.pt"
