@@ -17,9 +17,24 @@ import os
 from pathlib import Path
 from typing import Iterable
 
+# Pin per-process math/codec threads to 1 so the worker-pool size is the only
+# source of parallelism. Without this, each worker's OpenCV/BLAS spawns its own
+# threads and the pool saturates every core, defeating the worker cap. Must be
+# set before cv2/numpy import so BLAS/OpenMP read them.
+for _var in (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+):
+    os.environ.setdefault(_var, "1")
+
 import cv2
 import numpy as np
 from PIL import Image
+
+cv2.setNumThreads(1)
 
 try:
     from pycocotools import mask as mask_utils
@@ -127,6 +142,12 @@ def _write_frames(video_path: Path, frame_indices: list[int], out_dir: Path) -> 
     cap.release()
 
 
+def _worker_init() -> None:
+    # Re-apply for the 'spawn' start method, where the module-level call does
+    # not run in the child. Harmless under 'fork'.
+    cv2.setNumThreads(1)
+
+
 def _process_one(task: tuple) -> tuple[str, str]:
     """Worker: convert one video. Returns (video_id, status)."""
     video_id, ann_paths_str, raw_root_str, out_root_str, annotation_stride = task
@@ -194,26 +215,29 @@ def convert_sav(
         tasks = tasks[:max_videos]
 
     total = len(tasks)
-    print(f"[prepare_sav] {total} videos to process, {workers} workers")
+    print(f"[prepare_sav] {total} videos to process, {workers} workers", flush=True)
 
     done = skipped = errors = 0
-    with mp.Pool(workers) as pool:
+    with mp.Pool(workers, initializer=_worker_init) as pool:
         for video_id, status in pool.imap_unordered(_process_one, tasks, chunksize=4):
             if status == "skipped":
                 skipped += 1
+                print(f"[prepare_sav] already done: {video_id} [{done + skipped + errors}/{total}]", flush=True)
             elif status in ("no_masks", "no_mp4"):
                 errors += 1
-                print(f"[prepare_sav] skipping {video_id}: {status}")
+                print(f"[prepare_sav] skipping {video_id}: {status}", flush=True)
             else:
                 done += 1
                 print(
                     f"[prepare_sav] converted {video_id}: {status} annotated frames "
-                    f"(stride={annotation_stride}) [{done + skipped + errors}/{total}]"
+                    f"(stride={annotation_stride}) [{done + skipped + errors}/{total}]",
+                    flush=True,
                 )
 
     print(
         f"[prepare_sav] done — converted {done}, already done {skipped}, "
-        f"skipped (no data) {errors}, total {total}"
+        f"skipped (no data) {errors}, total {total}",
+        flush=True,
     )
 
 

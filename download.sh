@@ -515,10 +515,7 @@ else
     echo "      SA1B_RAW_DIR=/path/to/extracted_sa1b."
 fi
 
-if video_layout_ready "$SAV_DIR"; then
-    echo "[3/3] SA-V-style video data already prepared."
-    have_stage2=true
-elif [ -n "${SAV_RAW_DIR:-}" ]; then
+if [ -n "${SAV_RAW_DIR:-}" ]; then
     echo "[3/3] Converting SA-V raw dump from $SAV_RAW_DIR"
     if ! (
         set -euo pipefail
@@ -531,9 +528,6 @@ elif [ -n "${SAV_RAW_DIR:-}" ]; then
     ); then
         failed_downloads+=("SA-V conversion from $SAV_RAW_DIR")
         echo "[warn] SA-V conversion failed, skipping." >&2
-    fi
-    if video_layout_ready "$SAV_DIR"; then
-        have_stage2=true
     fi
 elif [ "$DOWNLOAD_SAV" = "1" ]; then
     echo "[3/3] Downloading and preparing SA-V from $SAV_MANIFEST"
@@ -559,9 +553,6 @@ elif [ "$DOWNLOAD_SAV" = "1" ]; then
         failed_downloads+=("SA-V [$SAV_MANIFEST]")
         echo "[warn] SA-V download failed, skipping." >&2
     fi
-    if video_layout_ready "$SAV_DIR"; then
-        have_stage2=true
-    fi
 else
     echo "[3/3] Missing SA-V-style video data."
     echo "      Download SA-V through $SAV_MANIFEST, or set"
@@ -569,6 +560,10 @@ else
     echo "      The converted output will use this layout:"
     echo "      $SAV_DIR/JPEGImages/{video_id}/00000.jpg"
     echo "      $SAV_DIR/Annotations/{video_id}/00000.png"
+fi
+
+if video_layout_ready "$SAV_DIR"; then
+    have_stage2=true
 fi
 
 if [ "${#failed_downloads[@]}" -gt 0 ]; then
