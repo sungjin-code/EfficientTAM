@@ -73,9 +73,15 @@ def _resolve_standard_layout(val_root: Path) -> tuple[Path, Path] | None:
 def _resolve_sav_layout(val_root: Path) -> tuple[Path, Path] | None:
     candidates = [
         (val_root / "JPEGImages_24fps", val_root / "Annotations_6fps"),
-        (val_root / "valid" / "JPEGImages_24fps", val_root / "valid" / "Annotations_6fps"),
+        (
+            val_root / "valid" / "JPEGImages_24fps",
+            val_root / "valid" / "Annotations_6fps",
+        ),
         (val_root / "val" / "JPEGImages_24fps", val_root / "val" / "Annotations_6fps"),
-        (val_root / "test" / "JPEGImages_24fps", val_root / "test" / "Annotations_6fps"),
+        (
+            val_root / "test" / "JPEGImages_24fps",
+            val_root / "test" / "Annotations_6fps",
+        ),
     ]
     for jpeg_root, ann_root in candidates:
         if _has_video_dirs(jpeg_root, ann_root):

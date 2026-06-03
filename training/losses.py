@@ -112,9 +112,7 @@ class MultiStepLoss(torch.nn.Module):
             assert isinstance(object_score_logits, list)
             total_loss = gt_mask.new_zeros(())
             metric_sums: dict[str, torch.Tensor] = {}
-            for masks_i, ious_i, obj_i in zip(
-                mask_logits, ious, object_score_logits
-            ):
+            for masks_i, ious_i, obj_i in zip(mask_logits, ious, object_score_logits):
                 loss_i, metrics_i = self._forward_one(
                     masks_i, ious_i, obj_i, gt_mask, has_object
                 )

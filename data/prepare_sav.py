@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing as mp
+import os
 from pathlib import Path
 from typing import Iterable
 
@@ -112,10 +114,10 @@ def _collect_masks(
 
 
 def _write_frames(video_path: Path, frame_indices: list[int], out_dir: Path) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video: {video_path}")
-    out_dir.mkdir(parents=True, exist_ok=True)
     for frame_idx in frame_indices:
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
         ok, frame_bgr = cap.read()
@@ -125,12 +127,46 @@ def _write_frames(video_path: Path, frame_indices: list[int], out_dir: Path) -> 
     cap.release()
 
 
+def _process_one(task: tuple) -> tuple[str, str]:
+    """Worker: convert one video. Returns (video_id, status)."""
+    video_id, ann_paths_str, raw_root_str, out_root_str, annotation_stride = task
+    raw_root = Path(raw_root_str)
+    out_root = Path(out_root_str)
+
+    ann_dir = out_root / "Annotations" / video_id
+    # Resume: Annotations dir exists and is non-empty → already done
+    if ann_dir.exists() and any(ann_dir.iterdir()):
+        return video_id, "skipped"
+
+    ann_paths = [Path(p) for p in ann_paths_str]
+    video_id_actual, masks_by_frame = _collect_masks(ann_paths)
+    if not masks_by_frame:
+        return video_id, "no_masks"
+
+    video_path = _find_video(raw_root, video_id)
+    if video_path is None:
+        return video_id, "no_mp4"
+
+    frame_indices = sorted(masks_by_frame)
+    video_frame_indices = [idx * annotation_stride for idx in frame_indices]
+
+    ann_dir.mkdir(parents=True, exist_ok=True)
+    _write_frames(video_path, video_frame_indices, out_root / "JPEGImages" / video_id)
+    for frame_idx, video_frame_idx in zip(frame_indices, video_frame_indices):
+        Image.fromarray(masks_by_frame[frame_idx]).save(
+            ann_dir / f"{video_frame_idx:05d}.png"
+        )
+
+    return video_id_actual, str(len(frame_indices))
+
+
 def convert_sav(
     input_dir: str | Path,
     output_dir: str | Path,
     annotation_kind: str = "both",
     max_videos: int | None = None,
     annotation_stride: int = 4,
+    num_workers: int = 0,
 ) -> None:
     raw_root = Path(input_dir)
     out_root = Path(output_dir)
@@ -144,32 +180,41 @@ def convert_sav(
     if not grouped:
         raise RuntimeError(f"No SA-V annotation JSON files found under {raw_root}")
 
-    for count, paths in enumerate(grouped.values(), start=1):
-        if max_videos is not None and count > max_videos:
-            break
-        video_id, masks_by_frame = _collect_masks(paths)
-        if not masks_by_frame:
-            print(f"[prepare_sav] skipping {video_id}: no decoded masks")
-            continue
-        video_path = _find_video(raw_root, video_id)
-        if video_path is None:
-            print(f"[prepare_sav] skipping {video_id}: mp4 not found")
-            continue
+    if num_workers > 0:
+        workers = num_workers
+    else:
+        _getaffinity = getattr(os, "sched_getaffinity", None)
+        available = len(_getaffinity(0)) if _getaffinity else (os.cpu_count() or 1)
+        workers = max(1, int(available * 0.6))
+    tasks = [
+        (vid, [str(p) for p in paths], str(raw_root), str(out_root), annotation_stride)
+        for vid, paths in grouped.items()
+    ]
+    if max_videos is not None:
+        tasks = tasks[:max_videos]
 
-        frame_indices = sorted(masks_by_frame)
-        video_frame_indices = [idx * annotation_stride for idx in frame_indices]
-        image_dir = out_root / "JPEGImages" / video_id
-        ann_dir = out_root / "Annotations" / video_id
-        ann_dir.mkdir(parents=True, exist_ok=True)
-        _write_frames(video_path, video_frame_indices, image_dir)
-        for frame_idx, video_frame_idx in zip(frame_indices, video_frame_indices):
-            Image.fromarray(masks_by_frame[frame_idx]).save(
-                ann_dir / f"{video_frame_idx:05d}.png"
-            )
-        print(
-            f"[prepare_sav] converted {video_id}: {len(frame_indices)} annotated frames "
-            f"(stride={annotation_stride})"
-        )
+    total = len(tasks)
+    print(f"[prepare_sav] {total} videos to process, {workers} workers")
+
+    done = skipped = errors = 0
+    with mp.Pool(workers) as pool:
+        for video_id, status in pool.imap_unordered(_process_one, tasks, chunksize=4):
+            if status == "skipped":
+                skipped += 1
+            elif status in ("no_masks", "no_mp4"):
+                errors += 1
+                print(f"[prepare_sav] skipping {video_id}: {status}")
+            else:
+                done += 1
+                print(
+                    f"[prepare_sav] converted {video_id}: {status} annotated frames "
+                    f"(stride={annotation_stride}) [{done + skipped + errors}/{total}]"
+                )
+
+    print(
+        f"[prepare_sav] done — converted {done}, already done {skipped}, "
+        f"skipped (no data) {errors}, total {total}"
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -188,6 +233,12 @@ def parse_args() -> argparse.Namespace:
         default=4,
         help="Video-frame stride between SA-V annotations. Official SA-V is 6 fps annotations on 24 fps videos, so the default is 4.",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help="Parallel worker processes. 0 = all CPU cores (default).",
+    )
     return parser.parse_args()
 
 
@@ -199,6 +250,7 @@ def main() -> None:
         annotation_kind=args.annotation_kind,
         max_videos=args.max_videos,
         annotation_stride=args.annotation_stride,
+        num_workers=args.workers,
     )
 
 

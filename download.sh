@@ -526,7 +526,8 @@ elif [ -n "${SAV_RAW_DIR:-}" ]; then
             --input-dir "$SAV_RAW_DIR" \
             --output-dir "$SAV_DIR" \
             --annotation-kind "${SAV_ANNOTATION_KIND:-both}" \
-            --annotation-stride "${SAV_ANNOTATION_STRIDE:-4}"
+            --annotation-stride "${SAV_ANNOTATION_STRIDE:-4}" \
+            --workers "${SAV_WORKERS:-0}"
     ); then
         failed_downloads+=("SA-V conversion from $SAV_RAW_DIR")
         echo "[warn] SA-V conversion failed, skipping." >&2
@@ -549,7 +550,8 @@ elif [ "$DOWNLOAD_SAV" = "1" ]; then
                 --input-dir "$_extract_dir" \
                 --output-dir "$SAV_DIR" \
                 --annotation-kind "${SAV_ANNOTATION_KIND:-both}" \
-                --annotation-stride "${SAV_ANNOTATION_STRIDE:-4}"
+                --annotation-stride "${SAV_ANNOTATION_STRIDE:-4}" \
+                --workers "${SAV_WORKERS:-0}"
         else
             echo "      skipped SA-V extraction because EXTRACT_DATASETS=$EXTRACT_DATASETS"
         fi

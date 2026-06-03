@@ -51,7 +51,9 @@ def _normalize_inline(text: str) -> str:
 
 def _is_skip_line(line: str) -> bool:
     stripped = line.strip()
-    return PAGE_RE.fullmatch(stripped) is not None or stripped.startswith(WATERMARK_PREFIXES)
+    return PAGE_RE.fullmatch(stripped) is not None or stripped.startswith(
+        WATERMARK_PREFIXES
+    )
 
 
 def _is_heading(line: str) -> bool:
