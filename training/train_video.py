@@ -165,6 +165,12 @@ def main() -> None:
     if args.init_from is not None or args.resume is not None:
         overrides = _drop_default_image_encoder_pretrain(overrides)
     overrides.append("++model.compile_image_encoder=false")
+    # Activation checkpointing on the image-encoder trunk trades ~20-30% step
+    # time for a large drop in activation memory (the dominant cost when each
+    # clip frame is duplicated per object). On by default; set
+    # train.use_act_checkpoint=false in the YAML to disable when memory allows.
+    if train_cfg.get("use_act_checkpoint", True):
+        overrides.append("++model.image_encoder.trunk.use_act_checkpoint=true")
 
     model = build_efficienttam(
         config_file=model_cfg["config_file"],

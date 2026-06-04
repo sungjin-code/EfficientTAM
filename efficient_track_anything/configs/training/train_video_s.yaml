@@ -30,6 +30,11 @@ train:
   iou_w: 1.0
   obj_w: 1.0
 
+  # Recompute image-encoder activations in the backward pass to cut peak memory
+  # (large saving since each clip frame is duplicated per object). ~20-30% slower.
+  # Set to false if you have spare VRAM and want max throughput.
+  use_act_checkpoint: true
+
   image_size: 1024
   clip_len: 8
   stride_choices: [1, 2, 3]

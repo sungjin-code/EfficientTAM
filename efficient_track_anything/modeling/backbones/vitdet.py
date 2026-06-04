@@ -6,6 +6,7 @@ from typing import List, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from efficient_track_anything.modeling.backbones.utils import (
     get_abs_pos,
@@ -225,6 +226,10 @@ class ViT(nn.Module):
         """
         super().__init__()
         self.pretrain_use_cls_token = pretrain_use_cls_token
+        # When True, trade compute for memory: each transformer block is run
+        # under activation checkpointing during training (recomputed in the
+        # backward pass instead of being kept in memory). Inference is unaffected.
+        self.use_act_checkpoint = use_act_checkpoint
 
         self.patch_embed = PatchEmbed(
             kernel_size=(patch_size, patch_size),
@@ -288,7 +293,10 @@ class ViT(nn.Module):
 
         outputs = []
         for i, blk in enumerate(self.blocks):
-            x = blk(x)
+            if self.use_act_checkpoint and self.training:
+                x = checkpoint(blk, x, use_reentrant=False)
+            else:
+                x = blk(x)
             if (i == self.full_attn_ids[-1]) or (
                 self.return_interm_layers and i in self.full_attn_ids
             ):
