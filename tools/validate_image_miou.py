@@ -91,15 +91,23 @@ def main() -> None:
     parser.add_argument("--root", required=True)
     parser.add_argument("--max-images", type=int, default=None)
     parser.add_argument("--output-json", required=True)
+    parser.add_argument(
+        "--no-compile",
+        action="store_true",
+        help="Disable image-encoder torch.compile (skips slow max-autotune; "
+        "useful for short/smoke validation runs).",
+    )
     args = parser.parse_args()
 
     device = pick_device()
     print(f"[validate_image_miou] device={device}")
+    overrides = ["++model.compile_image_encoder=false"] if args.no_compile else []
     model = build_efficienttam(
         config_file=args.config,
         ckpt_path=args.ckpt,
         device=str(device),
         mode="eval",
+        hydra_overrides_extra=overrides,
     )
     predictor = EfficientTAMImagePredictor(model)
     results = evaluate_image_root(predictor, Path(args.root), args.max_images)

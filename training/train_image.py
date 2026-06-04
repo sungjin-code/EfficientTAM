@@ -17,6 +17,10 @@ hyperparameters. Any positional CLI args are treated as Hydra-style overrides
 
 from __future__ import annotations
 
+import warnings
+
+warnings.filterwarnings("ignore")
+
 import argparse
 import os
 import sys

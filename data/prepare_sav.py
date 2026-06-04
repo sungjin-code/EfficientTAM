@@ -188,6 +188,7 @@ def convert_sav(
     max_videos: int | None = None,
     annotation_stride: int = 4,
     num_workers: int = 0,
+    cpu_fraction: float = 0.6,
 ) -> None:
     raw_root = Path(input_dir)
     out_root = Path(output_dir)
@@ -206,7 +207,7 @@ def convert_sav(
     else:
         _getaffinity = getattr(os, "sched_getaffinity", None)
         available = len(_getaffinity(0)) if _getaffinity else (os.cpu_count() or 1)
-        workers = max(1, int(available * 0.6))
+        workers = max(1, int(available * cpu_fraction))
     tasks = [
         (vid, [str(p) for p in paths], str(raw_root), str(out_root), annotation_stride)
         for vid, paths in grouped.items()
@@ -261,7 +262,15 @@ def parse_args() -> argparse.Namespace:
         "--workers",
         type=int,
         default=0,
-        help="Parallel worker processes. 0 = all CPU cores (default).",
+        help="Absolute number of parallel worker processes. "
+        "0 = derive from --cpu-fraction (default).",
+    )
+    parser.add_argument(
+        "--cpu-fraction",
+        type=float,
+        default=0.6,
+        help="Fraction of available CPU cores to use when --workers is 0. "
+        "Default 0.6 (60%%).",
     )
     return parser.parse_args()
 
@@ -275,6 +284,7 @@ def main() -> None:
         max_videos=args.max_videos,
         annotation_stride=args.annotation_stride,
         num_workers=args.workers,
+        cpu_fraction=args.cpu_fraction,
     )
 
 

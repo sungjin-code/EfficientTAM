@@ -317,6 +317,11 @@ if [ "$SMOKE_VALIDATE" = "1" ]; then
     if [ -n "$SMOKE_MAX_VAL_VIDEOS" ]; then
         val_args+=(--max-videos "$SMOKE_MAX_VAL_VIDEOS")
     fi
+    # Smoke runs are short; skip the slow max-autotune image-encoder compile.
+    # Set SMOKE_VALIDATE_COMPILE=1 to keep compilation on.
+    if [ "${SMOKE_VALIDATE_COMPILE:-0}" != "1" ]; then
+        val_args+=(--no-compile)
+    fi
     "$PYTHON" -m tools.validate_vos_suite \
         --config "$VALIDATE_CONFIG" \
         --ckpt "$VIDEO_OUT/video_final.pt" \
@@ -331,6 +336,9 @@ if [ "$SMOKE_IMAGE_EVAL" = "1" ] && [ -n "${SA23_ROOT:-}" ]; then
     image_eval_args=()
     if [ -n "$SMOKE_MAX_VAL_IMAGES" ]; then
         image_eval_args+=(--max-images "$SMOKE_MAX_VAL_IMAGES")
+    fi
+    if [ "${SMOKE_VALIDATE_COMPILE:-0}" != "1" ]; then
+        image_eval_args+=(--no-compile)
     fi
     "$PYTHON" -m tools.validate_image_miou \
         --config "$VALIDATE_CONFIG" \

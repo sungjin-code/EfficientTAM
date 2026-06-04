@@ -244,6 +244,11 @@ def forward_clip(
 class TrainState:
     step: int = 0
     epoch: int = 0
+    # Adaptive image-encoder forward chunk size (samples processed per forward).
+    # 0 = uninitialized (set to the full batch on first use). `auto_chunk_max`
+    # caps re-growth at the largest size that previously OOMed.
+    auto_chunk: int = 0
+    auto_chunk_max: int = 0
 
 
 def _aggregate_clip_metrics(per_frame: list[dict]) -> dict:
@@ -311,6 +316,120 @@ def _optimizer_step(
     state.step += 1
 
 
+def _maybe_grow_chunk(state: TrainState, device: torch.device, n: int) -> None:
+    """Grow the forward chunk when this process's peak memory leaves headroom.
+
+    Uses the caching allocator's peak (reset each batch) rather than free memory
+    between batches, which would over-report headroom. Capped at `auto_chunk_max`
+    so we never climb back to a size that already OOMed.
+    """
+    if device.type != "cuda":
+        return
+    chunk = state.auto_chunk if state.auto_chunk > 0 else n
+    cap = min(state.auto_chunk_max if state.auto_chunk_max > 0 else n, n)
+    if chunk >= cap:
+        return
+    total = torch.cuda.get_device_properties(device).total_memory
+    peak = torch.cuda.max_memory_reserved(device)
+    torch.cuda.reset_peak_memory_stats(device)
+    if total > 0 and peak / total < 0.70:
+        new = min(cap, chunk + max(1, chunk // 4))
+        if new > chunk:
+            state.auto_chunk = new
+            print(
+                f"[image] peak mem {peak / total:.0%} of GPU — growing forward "
+                f"chunk {chunk} -> {new}"
+            )
+
+
+def _image_forward_backward_adaptive(
+    *,
+    model: torch.nn.Module,
+    frames: torch.Tensor,
+    gt: torch.Tensor,
+    ho: torch.Tensor,
+    point_inputs: dict,
+    prompt_sampler: PromptSampler,
+    loss_fn: MultiStepLoss,
+    precision: str,
+    device: torch.device,
+    accumulation_steps: int,
+    state: TrainState,
+    optimizer: torch.optim.Optimizer,
+) -> tuple[float, dict, bool]:
+    """Forward+backward one image batch in memory-adaptive chunks.
+
+    Splits the N independent T=1 samples into sub-batches, shrinking on CUDA OOM
+    and growing when memory is plentiful. Each chunk's loss is weighted by
+    (chunk / N) so the accumulated gradient equals the full-batch mean — making
+    the no-OOM path (single chunk = N) identical to a plain full-batch step.
+
+    Returns (step_loss, components, oom_reset). When `oom_reset` is True an OOM
+    occurred: grads were cleared and the batch skipped, so the caller must reset
+    its accumulation window. `step_loss` may be NaN for the caller's NaN guard.
+
+    Note: under DDP each chunk triggers a gradient all-reduce (one per chunk).
+    With world_size==1 this is a no-op; multi-GPU users pay extra syncs only
+    while the chunk size is below the batch size.
+    """
+    n = frames.shape[0]
+    if device.type != "cuda":
+        chunk = n
+    else:
+        if state.auto_chunk <= 0:
+            state.auto_chunk = n
+        chunk = max(1, min(state.auto_chunk, n))
+
+    step_loss = 0.0
+    comp_sums: dict[str, float] = {}
+    try:
+        for i in range(0, n, chunk):
+            cur = min(chunk, n - i)
+            sl = slice(i, i + cur)
+            with _autocast(device, precision):
+                out = forward_clip(
+                    model=model,
+                    frames=frames[sl],
+                    gt_masks=gt[sl],
+                    has_object=ho[sl],
+                    frame0_point_inputs={k: v[sl] for k, v in point_inputs.items()},
+                    correction_frames=[[] for _ in range(cur)],
+                    prompt_sampler=prompt_sampler,
+                    loss_fn=loss_fn,
+                    run_mem_encoder=False,
+                )
+                loss = out.total_loss
+            chunk_loss = float(loss.detach().item())
+            if not math.isfinite(chunk_loss):
+                return float("nan"), {}, False
+            weight = cur / n
+            (loss * weight / accumulation_steps).backward()
+            step_loss += chunk_loss * weight
+            for k, v in _aggregate_clip_metrics(out.per_frame_metrics).items():
+                comp_sums[k] = comp_sums.get(k, 0.0) + v * weight
+    except RuntimeError as exc:
+        # `torch.cuda.OutOfMemoryError` subclasses RuntimeError on modern torch;
+        # older versions raise a plain RuntimeError with this message. Re-raise
+        # anything that is not an OOM so real bugs still surface.
+        if "out of memory" not in str(exc).lower():
+            raise
+        optimizer.zero_grad(set_to_none=True)
+        torch.cuda.empty_cache()
+        new_chunk = max(1, chunk // 2)
+        if new_chunk >= chunk:
+            raise  # cannot fit even a single sample
+        state.auto_chunk = new_chunk
+        state.auto_chunk_max = chunk  # never re-grow to a size that OOMed
+        print(
+            f"[image] CUDA OOM at forward chunk={chunk} — shrinking to "
+            f"{new_chunk} and skipping this batch"
+        )
+        return 0.0, {}, True
+
+    _maybe_grow_chunk(state, device, n)
+    return step_loss, comp_sums, False
+
+
 def train_one_epoch_image(
     model: torch.nn.Module,
     loader: Iterable[dict],
@@ -337,7 +456,7 @@ def train_one_epoch_image(
     for k in component_keys:
         running[k] = 0.0
     t_start = time.time()
-    loss = torch.zeros((), device=device)
+    last_step_loss = 0.0
     last_components: dict[str, float] = {}
     consecutive_nan = 0
     MAX_CONSECUTIVE_NAN = 50
@@ -366,22 +485,31 @@ def train_one_epoch_image(
         gt = gt_masks.unsqueeze(1)  # [N, 1, 1, H, W]
         ho = has_object.unsqueeze(1)  # [N, 1]
 
-        with _autocast(device, precision):
-            out = forward_clip(
-                model=model,
-                frames=frames,
-                gt_masks=gt,
-                has_object=ho,
-                frame0_point_inputs=point_inputs,
-                correction_frames=[[] for _ in range(frames.shape[0])],
-                prompt_sampler=prompt_sampler,
-                loss_fn=loss_fn,
-                run_mem_encoder=False,
-            )
-            loss = out.total_loss
+        # Forward+backward with adaptive memory chunking (shrinks on CUDA OOM,
+        # grows when memory is plentiful). Backward happens inside.
+        step_loss, last_components, oom_reset = _image_forward_backward_adaptive(
+            model=model,
+            frames=frames,
+            gt=gt,
+            ho=ho,
+            point_inputs=point_inputs,
+            prompt_sampler=prompt_sampler,
+            loss_fn=loss_fn,
+            precision=precision,
+            device=device,
+            accumulation_steps=accumulation_steps,
+            state=state,
+            optimizer=optimizer,
+        )
+        if oom_reset:
+            # OOM cleared grads mid-window; reset the accumulation window cleanly.
+            pending_micro_batches = 0
+            running = {"loss": 0.0, "n": 0.0}
+            for k in component_keys:
+                running[k] = 0.0
+            continue
 
         # NaN/Inf guard — a poisoned step corrupts every param via optimizer.step.
-        step_loss = float(loss.detach().item())
         if not math.isfinite(step_loss):
             consecutive_nan += 1
             print(
@@ -404,11 +532,10 @@ def train_one_epoch_image(
             continue
         consecutive_nan = 0
 
-        (loss / accumulation_steps).backward()
+        last_step_loss = step_loss
         pending_micro_batches += 1
         running["loss"] += step_loss
         running["n"] += 1
-        last_components = _aggregate_clip_metrics(out.per_frame_metrics)
         for k in component_keys:
             running[k] += last_components.get(k, 0.0)
 
@@ -471,7 +598,7 @@ def train_one_epoch_image(
             accumulation_steps=accumulation_steps,
             pending_micro_batches=pending_micro_batches,
         )
-    final = {"final_loss": float(loss.detach().item())}
+    final = {"final_loss": last_step_loss}
     for k, v in last_components.items():
         final[f"final_{k}"] = v
     return final

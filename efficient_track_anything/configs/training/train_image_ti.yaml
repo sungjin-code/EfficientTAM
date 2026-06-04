@@ -11,9 +11,9 @@ model:
 train:
   epochs: 1000000
   max_steps: 90000
-  batch_size: 16              # per GPU; paper global batch is 256
+  batch_size: 8               # per GPU; paper global batch is 256 (accumulation makes up the rest)
   accumulation_steps: 1
-  num_workers: 4
+  num_workers: 2
   backbone_lr: 4.0e-4
   head_lr: 4.0e-4
   layerwise_decay: 0.8
@@ -41,7 +41,7 @@ train:
   affine_degree: 25.0
   affine_shear: 20.0
 
-  objects_per_image: 64
+  objects_per_image: 16
 
   log_every: 20
   seed: 0

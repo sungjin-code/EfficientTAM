@@ -59,6 +59,12 @@ def main() -> None:
     parser.add_argument("--ckpt", required=True)
     parser.add_argument("--output-json", required=True)
     parser.add_argument("--max-videos", type=int, default=None)
+    parser.add_argument(
+        "--no-compile",
+        action="store_true",
+        help="Disable image-encoder torch.compile (skips slow max-autotune; "
+        "useful for short/smoke validation runs).",
+    )
     for name, env_name in BENCHMARK_ENV.items():
         parser.add_argument(
             f"--{name}",
@@ -77,11 +83,13 @@ def main() -> None:
 
     device = pick_device()
     print(f"[validate_vos_suite] device={device}")
+    overrides = ["++model.compile_image_encoder=false"] if args.no_compile else []
     predictor = build_efficienttam_video_predictor(
         config_file=args.config,
         ckpt_path=args.ckpt,
         device=str(device),
         mode="eval",
+        hydra_overrides_extra=overrides,
     )
 
     results: dict[str, dict] = {}

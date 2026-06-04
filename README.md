@@ -10,6 +10,15 @@ Paper: [Efficient Track Anything, ICCV 2025](https://openaccess.thecvf.com/conte
 If you are a coding agent, read [AGENT.md](AGENT.md) before editing this
 repository.
 
+> [!WARNING]
+> **Reference use only.** The training and data pipelines here carry ad-hoc
+> workarounds for running on a constrained, shared GPU environment — adaptive
+> memory chunking, fractional CPU-core limits, automatic OOM shrink/grow, and
+> disabling compilation during smoke tests, among others. These deviate from
+> the paper's original recipe, so do not rely on this code for faithful
+> reproduction or production training. On dedicated hardware, remove these
+> workarounds and re-validate with the standard configuration.
+
 ## What Is Here
 
 ```text

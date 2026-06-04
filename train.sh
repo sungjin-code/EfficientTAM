@@ -5,18 +5,10 @@ ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT_DIR"
 
 if [ -f .env ]; then
-    declare -A _ENV_OVERRIDES=()
-    while IFS= read -r _name; do
-        _ENV_OVERRIDES["$_name"]="${!_name}"
-    done < <(compgen -e)
     set -a
     # shellcheck disable=SC1091
     . ./.env
     set +a
-    for _name in "${!_ENV_OVERRIDES[@]}"; do
-        export "$_name=${_ENV_OVERRIDES[$_name]}"
-    done
-    unset _name _ENV_OVERRIDES
 else
     echo "Error: .env file not found."
     echo "Please copy .env.example to .env and configure your paths."
