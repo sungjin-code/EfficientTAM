@@ -223,7 +223,10 @@ def convert_sav(
         for video_id, status in pool.imap_unordered(_process_one, tasks, chunksize=4):
             if status == "skipped":
                 skipped += 1
-                print(f"[prepare_sav] already done: {video_id} [{done + skipped + errors}/{total}]", flush=True)
+                print(
+                    f"[prepare_sav] already done: {video_id} [{done + skipped + errors}/{total}]",
+                    flush=True,
+                )
             elif status in ("no_masks", "no_mp4"):
                 errors += 1
                 print(f"[prepare_sav] skipping {video_id}: {status}", flush=True)

@@ -11,8 +11,8 @@ model:
 train:
   epochs: 1000000
   max_steps: 300000
-  batch_size: 4                 # per GPU; paper global batch is 256
-  accumulation_steps: 1
+  batch_size: 1 # per GPU; paper global batch is 256
+  accumulation_steps: 256
   num_workers: 2
 
   backbone_lr: 6.0e-5

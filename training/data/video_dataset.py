@@ -92,6 +92,7 @@ class VideoSegmentationDataset(Dataset):
         self.objects_per_clip = objects_per_clip
         self.rng = random.Random(seed)
         self.videos = _list_videos(self.root)
+        self._missing_sample_warnings = 0
 
     def __len__(self) -> int:
         return len(self.videos)
@@ -109,6 +110,19 @@ class VideoSegmentationDataset(Dataset):
         return (m == obj_id).astype(np.uint8)
 
     def __getitem__(self, idx: int) -> dict:
+        last_error: FileNotFoundError | None = None
+        for offset in range(len(self.videos)):
+            try:
+                return self._load_sample((idx + offset) % len(self.videos))
+            except FileNotFoundError as exc:
+                last_error = exc
+                if self._missing_sample_warnings < 10:
+                    print(f"[video_dataset] skipping sample with missing file: {exc}")
+                    self._missing_sample_warnings += 1
+        assert last_error is not None
+        raise last_error
+
+    def _load_sample(self, idx: int) -> dict:
         video = self.videos[idx]
         frames = self._list_frames(video)
         if len(frames) < self.clip_len:
@@ -127,11 +141,10 @@ class VideoSegmentationDataset(Dataset):
         clip_paths = [frames[i] for i in idxs]
 
         # Pick up to `objects_per_clip` object ids present in the first sampled frame.
-        ann0 = np.array(
-            Image.open(
-                self.root / "Annotations" / video / (clip_paths[0].stem + ".png")
-            )
-        )
+        ann0_path = self.root / "Annotations" / video / (clip_paths[0].stem + ".png")
+        if not ann0_path.exists():
+            raise FileNotFoundError(str(ann0_path))
+        ann0 = np.array(Image.open(ann0_path))
         if ann0.ndim == 3:
             ann0 = ann0[..., 0]
         present_ids = [int(i) for i in np.unique(ann0) if i != 0]
