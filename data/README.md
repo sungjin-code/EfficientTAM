@@ -1,13 +1,10 @@
 # Data Path Contract
 
-This repository uses three distinct data states. Scripts must not treat them as
-interchangeable:
+This repository uses three distinct data states. Scripts must not treat them as interchangeable:
 
 1. **Archive cache**: downloaded `.tar`/`.zip` files under `$RAW_DATA_DIR`.
-2. **Raw extracted cache**: extracted paper files, still in original dataset
-   format, under `$RAW_DATA_DIR`.
-3. **Prepared training/evaluation roots**: layouts consumed by training and
-   validation code.
+2. **Raw extracted cache**: extracted paper files, still in original dataset format, under `$RAW_DATA_DIR`.
+3. **Prepared training/evaluation roots**: layouts consumed by training and validation code.
 
 With the current `.env`:
 
@@ -38,8 +35,7 @@ _data/raw/sav_archives
 _data/raw/sav_extracted
 ```
 
-The `*_sample_*` paths are legacy/debug paths. New scripts should not depend on
-them. If sample data is reused, move or copy it into the canonical paths first.
+The `*_sample_*` paths are legacy/debug paths. New scripts should not depend on them. If sample data is reused, move or copy it into the canonical paths first.
 
 ## Prepared Training Roots
 
@@ -57,8 +53,7 @@ Stage 2 video training requires:
 {DATA_ROOT_VIDEO or DATA_ROOT/sav}/Annotations/{video_id}/*.png
 ```
 
-`_data/SA-V-test` is not a Stage 2 training root. It is an evaluation root with
-SA-V test layout:
+`_data/SA-V-test` is not a Stage 2 training root. It is an evaluation root with SA-V test layout:
 
 ```text
 _data/SA-V-test/sav_test/JPEGImages_24fps/{video_id}/*.jpg
@@ -96,11 +91,9 @@ SAV_RAW_DIR=./_data/raw/sav_extracted \
 ./download.sh
 ```
 
-This tells `download.sh` to skip evaluation downloads and convert existing raw
-SA-1B/SA-V extracts into the normal prepared roots.
+This tells `download.sh` to skip evaluation downloads and convert existing raw SA-1B/SA-V extracts into the normal prepared roots.
 
-If `SA1B_RAW_DIR` or `SAV_RAW_DIR` is not set, `download.sh` may download from
-the manifests into:
+If `SA1B_RAW_DIR` or `SAV_RAW_DIR` is not set, `download.sh` may download from the manifests into:
 
 ```text
 $RAW_DIR/sa1b_archives -> $RAW_DIR/sa1b_extracted -> $SA1B_DIR
@@ -117,17 +110,13 @@ VAL_ROOT_SAV   or DATA_ROOT/SA-V-test
 VAL_ROOT_YTVOS or DATA_ROOT/YTVOS2019
 ```
 
-`smoke_test.sh` and `train.sh` may resolve these parent directories to a usable
-split subdirectory when needed, such as `MOSE/valid`, `LVOS/train`,
-`SA-V-test/sav_test`, or `YTVOS2019/valid`.
+`smoke_test.sh` and `train.sh` may resolve these parent directories to a usable split subdirectory when needed, such as `MOSE/valid`, `LVOS/train`, `SA-V-test/sav_test`, or `YTVOS2019/valid`.
 
-Evaluation roots must never be used as substitutes for SA-1B or SA-V training
-data.
+Evaluation roots must never be used as substitutes for SA-1B or SA-V training data.
 
 ## `smoke_test.sh`
 
-`smoke_test.sh` is a consumer of prepared data. It should not consume raw
-archives or raw extracted caches directly.
+`smoke_test.sh` is a consumer of prepared data. It should not consume raw archives or raw extracted caches directly.
 
 Image root resolution:
 
@@ -155,9 +144,7 @@ For the current `.env`, smoke training should succeed only after these exist:
 ./_data/sav/Annotations
 ```
 
-If the video root is missing, the correct next step is to run `download.sh` with
-`SAV_RAW_DIR=./_data/raw/sav_extracted`; it is not correct to point
-`DATA_ROOT_VIDEO` at `_data/SA-V-test`.
+If the video root is missing, the correct next step is to run `download.sh` with `SAV_RAW_DIR=./_data/raw/sav_extracted`; it is not correct to point `DATA_ROOT_VIDEO` at `_data/SA-V-test`.
 
 Smoke evaluation may use any configured VOS evaluation root, including:
 
@@ -167,8 +154,7 @@ VAL_ROOT_SAV=./_data/SA-V-test/sav_test
 
 ## `train.sh`
 
-`train.sh` is also a consumer of prepared data, but for full training. It uses
-the same training root contract as `download.sh`:
+`train.sh` is also a consumer of prepared data, but for full training. It uses the same training root contract as `download.sh`:
 
 ```text
 DATA_ROOT_IMAGE, or DATA_ROOT/sa1b
@@ -192,13 +178,11 @@ VAL_ROOT_SAV
 VAL_ROOT_YTVOS
 ```
 
-The evaluation roots may use DAVIS-style layouts or SA-V test layout, but they
-are validation inputs only. They do not satisfy `DATA_ROOT_VIDEO`.
+The evaluation roots may use DAVIS-style layouts or SA-V test layout, but they are validation inputs only. They do not satisfy `DATA_ROOT_VIDEO`.
 
 ## Script Communication Rule
 
-The scripts communicate through prepared directories and environment variables,
-not through implicit raw-cache guesses:
+The scripts communicate through prepared directories and environment variables, not through implicit raw-cache guesses:
 
 ```text
 raw archives/extracts -> download.sh -> prepared roots -> smoke_test.sh/train.sh
@@ -215,5 +199,4 @@ SAV_RAW_DIR=./_data/raw/sav_extracted \
 VAL_ROOT_SAV=./_data/SA-V-test/sav_test ./smoke_test.sh
 ```
 
-After `download.sh` has prepared `./_data/sav`, `train.sh` can use the same
-`.env` values without additional training-data overrides.
+After `download.sh` has prepared `./_data/sav`, `train.sh` can use the same `.env` values without additional training-data overrides.

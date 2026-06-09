@@ -34,7 +34,7 @@ train:
   use_act_checkpoint: true
 
   image_size: 1024
-  clip_len: 8
+  clip_len: 4 # paper uses 8; halved to fit shared-GPU VRAM
   stride_choices: [1, 2, 3]
   correction_prob: 0.5
   max_correction_frames: 2
@@ -57,7 +57,10 @@ train:
   affine_degree: 25.0
   affine_shear: 20.0
 
-  objects_per_clip: 3
+  # Paper: 3 masks per video frame. Reduced to 1 on shared GPUs — this axis is
+  # flattened into the batch dim and the encoder re-runs per object, so it is the
+  # single biggest activation-memory lever. Raise back toward 3 when VRAM allows.
+  objects_per_clip: 1
 
   log_every: 5
   seed: 0
